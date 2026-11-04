@@ -1,6 +1,37 @@
 # Uniform Conversion Comparison
 
-Current revision is r15, verified at 2026-11-03T13:26:42.725Z (November 3 at 8:26:42 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r15.
+Current revision is r16, verified at 2026-11-04T14:14:26.071Z (November 4 at 9:14:26 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r16.
+
+## Approved Revision 16: Automated Message-Taker Closeout
+
+Yoni approved the narrow Harrison-class fix for staged automated receptionists that offer to
+take a message and callback number, restate it for confirmation, then confirm delivery and give
+a farewell. Maya now supplies the message and return number once, says one brief goodbye after
+the first completed farewell, and uses the authenticated guarded-ending path. The backend
+classifies this completed staged flow as automated screening / agent unavailable, suppresses a
+cold retry, and does not credit human gatekeeper contact. A live office admin asking an unscripted
+property or service question remains a human gatekeeper; ordinary voicemail, hold and incomplete
+screening do not use this exception.
+
+The paired publisher changed exactly seven reviewed provider leaves: the embedded opening-listener
+policy string and the six existing guarded-ending entry conditions. The root business prompt,
+tools, voices, models, audio, transfer/callback consent, platform/phone/WhatsApp/procedure fields
+and native 50/50 allocation are unchanged. Both final arms were independently read back and are
+directly identical after removing only the TTS model. No real, metered or lead call was placed.
+
+- Cohort: `maya_uniform_lead_conversion_20261104_r16`.
+- Boundary: `2026-11-04T14:14:26.071Z`.
+- Policy: `maya-uniform-lead-conversion-20261104-r16`.
+- Flash: `agtvrsn_7101m6kejb9xf0xbye478mxq0ddp`.
+- v4: `agtvrsn_0201m6kejettftj8rr5mprm8grg8`.
+- Unchanged root prompt: `6af0fb3748e0ecf26070168d806551e1f99f83ae1ed7ec2cd4d7569a85b33344`.
+- Shared normalized body: `0f92c5bc2095d56503e22bb94043d334fde64d9d7bcb84235c323ac8a8ddff4a`.
+- Workflow: `f8861d6cbe3c95a51f05b8980b31c588788c88945847f5e02ffa720eedef4849`.
+
+Release evidence is `work/voice-r16-provider/uniform-plan.json` and `uniform-receipt.json` in
+the November 4 Lead Intelligence task. Synthetic tests and configuration readback prove the
+guarded release shape, not organic adherence or conversion. R15 and all earlier samples remain
+historical and separate.
 
 ## Shared Backend Ending And Gatekeeper Repair, November 3
 

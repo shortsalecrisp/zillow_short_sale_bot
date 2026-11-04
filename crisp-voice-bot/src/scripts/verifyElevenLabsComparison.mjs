@@ -4,16 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const R8_COMPARISON = {
-  cohort: 'maya_uniform_lead_conversion_20261103_r15',
-  startedAt: '2026-11-03T13:26:42.725Z',
+  cohort: 'maya_uniform_lead_conversion_20261104_r16',
+  startedAt: '2026-11-04T14:14:26.071Z',
   agentId: 'agent_9901kpkhs1cmfgj8w9vm199nc92j',
-  sharedHash: 'e95c9034e9e7fd1a1e3cea4a681dc6c4e9f6692f5ccfc00ed00a1da37bc45f76',
-  workflowHash: 'a3d103de3083a9446599502bfda86311bd4bc7a4203180b7f2bf8380df5625ba',
+  sharedHash: '0f92c5bc2095d56503e22bb94043d334fde64d9d7bcb84235c323ac8a8ddff4a',
+  workflowHash: 'f8861d6cbe3c95a51f05b8980b31c588788c88945847f5e02ffa720eedef4849',
   waitingAudio: { sound: 'elevator1', availabilityToolId: 'tool_4101m64g0xqteevsgfwtpgxv4he6',
     availabilityToolHash: '6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63' },
   arms: [
-    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_7101m6gse6zefeqsa481y18yxjr4', ttsModel: 'eleven_flash_v2' },
-    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_9101m6gsebm7fzk85t478vmj1kzc', ttsModel: 'eleven_v4_turbo' },
+    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_7101m6kejb9xf0xbye478mxq0ddp', ttsModel: 'eleven_flash_v2' },
+    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_0201m6kejettftj8rr5mprm8grg8', ttsModel: 'eleven_v4_turbo' },
   ],
 };
 
