@@ -740,6 +740,29 @@ test("failed calls retain a contextual No that's okay decline without creating a
   measurementConversations.delete(conversationId);
 });
 
+test("an assistant's message offer cannot turn an interactive office gatekeeper into voicemail", async () => {
+  const { getAuthoritativeTerminalCallResult, shouldTreatAsVoicemail, hasLiveHumanGatekeeperEvidence } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = { status: "done", metadata: { call_duration_secs: 60, termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "The office responder said Jaye is unavailable and the assistant offered to leave a message." },
+    transcript: [
+      { role: "user", message: "Next Point Realty. H- how can I help you?" },
+      { role: "agent", message: "Hi, Maya with Crisp Short Sales, calling about Jaye's listing." },
+      { role: "user", message: "You said you're calling about which property?" },
+      { role: "agent", message: "The short-sale listing at 123 Main Street." },
+      { role: "user", message: "Okay, what would you like to know about it?" },
+      { role: "agent", message: "Is Jaye available, or are you the best person to discuss the listing?" },
+      { role: "user", message: "She is not available at this moment." },
+      { role: "agent", message: "If you'd like, I can leave a message for Jaye or provide Yoni's direct number." },
+    ] };
+  assert.equal(shouldTreatAsVoicemail(conversation), false);
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Jaye"), true);
+  assert.equal(getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Jaye" }), "gatekeeper_admin_early_exit");
+  const recording = { ...conversation, transcript: [{ role: "user", message: "You've reached Jaye. Please leave a message after the tone." }] };
+  assert.equal(shouldTreatAsVoicemail(recording), true);
+  const menu = { ...conversation, transcript: [{ role: "user", message: "Thank you for calling Synthetic Realty. Press one to leave a message." }] };
+  assert.equal(getAuthoritativeTerminalCallResult(menu, 1, { firstName: "Jaye" }), "agent_not_available");
+});
+
 test("an unresolved extension menu is unavailable, not voicemail merely because it says leave a message", async () => {
   const { getAuthoritativeTerminalCallResult } = await import("../src/lib/elevenLabsPostCall");
   const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");

@@ -37,6 +37,7 @@ import {
 export type VoiceLeadRowUpdates = {
   voiceReviewedDisposition?: ReviewedVoiceDisposition;
   voiceReviewedFirstReceipt?: string;
+  voiceReviewedSecondReceipt?: string;
   voiceReceiptOnly?: boolean;
   voiceTerminalReceipt?: VoiceTerminalReceiptProof;
   voiceExpectedStateHash?: string;
@@ -185,6 +186,16 @@ export function buildVoiceLeadRowWrites(
     const target = reviewedDispositionState(rowValues, Number(updates.callAttemptNumber), verifiedDisposition);
     if (updates.callResult !== target.callResult || updates.leadStatusCode !== target.leadStatusCode) {
       throw new Error("Reviewed disposition payload does not match independently verified target");
+    }
+    if (verifiedDisposition === "verified_historical_gatekeeper") {
+      if (!updates.voiceReviewedSecondReceipt) throw new Error("Historical gatekeeper reconciliation requires both exact receipts");
+      addWrite(writes, VOICE_BOT_COL_CALL_1_RESULT, "callResult", target.callResult);
+      appendVoiceNotesWrite(writes, rowValues, `${updates.voiceNotes ?? ""}\nCODEX_VOICE_CLASSIFICATION_RECONCILED_V1 ${JSON.stringify({
+        conversationId: updates.voiceTerminalReceipt.conversationId, secondConversationId: updates.voiceReviewedSecondReceipt,
+        callAttemptNumber: 1, reason: verifiedDisposition, previousResult: rowValues[33], callResult: target.callResult,
+        preservedK: rowValues[10], preservedSecondResult: rowValues[40], recordedAt: now.toISOString(),
+      })}`);
+      return writes;
     }
     addWrite(writes, updates.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT, "callResult", target.callResult);
     addWrite(writes, VOICE_BOT_COL_RESPONSE_STATUS, "responseStatus", updates.responseStatus);
@@ -376,6 +387,17 @@ async function writeVoiceLeadRow(
           if (!updates.voiceReviewedFirstReceipt) throw new Error("Caller-goodbye reconciliation requires both exact current-phone receipts");
           const first = await getTerminalReceipt(updates.voiceReviewedFirstReceipt);
           verifyVoiceTerminalReceipt(rowNumber, fresh, 1, { ...updates.voiceTerminalReceipt, conversationId: updates.voiceReviewedFirstReceipt }, first);
+        }
+        if (reason === "verified_historical_gatekeeper") {
+          if (!updates.voiceReviewedSecondReceipt) throw new Error("Historical gatekeeper reconciliation requires both exact receipts");
+          const second = await getTerminalReceipt(updates.voiceReviewedSecondReceipt);
+          verifyVoiceTerminalReceipt(rowNumber, fresh, 2, { ...updates.voiceTerminalReceipt, conversationId: updates.voiceReviewedSecondReceipt }, second);
+          const classifier = await import("./elevenLabsPostCall");
+          const conversation = second as Parameters<typeof classifier.getVoiceContactRequestResult>[0];
+          if (classifier.getVoiceContactRequestResult(conversation) || classifier.shouldTreatAsDoNotCall(conversation) ||
+              classifier.shouldTreatAsNotInterested(conversation) || classifier.getExplicitCallbackConsent(conversation)) {
+            throw new Error("Historical gatekeeper reconciliation held: later protected caller preference");
+          }
         }
         updates = { ...updates, ...target };
         verifiedDisposition = reason;

@@ -1,7 +1,7 @@
 import { normalizeMarker, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 
-export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_positive_needs" | "verified_caller_goodbye";
+export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper";
 
 export function reviewedDispositionState(row: unknown[], attempt: number, reason: ReviewedVoiceDisposition) {
   const marked = (v: unknown) => !["", "no", "false", "0"].includes(normalizeMarker(v));
@@ -12,8 +12,13 @@ export function reviewedDispositionState(row: unknown[], attempt: number, reason
     throw new Error("Reviewed disposition held: protected contact state");
   }
   const result = normalizeString(row[attempt === 1 ? 33 : 40]), K = normalizeString(row[10]);
-  if (!parseVoiceBotDate(row[attempt === 1 ? 32 : 39]) || (attempt === 1 && row[39])) {
+  if (!parseVoiceBotDate(row[attempt === 1 ? 32 : 39]) || (attempt === 1 && row[39] && reason !== "verified_historical_gatekeeper")) {
     throw new Error("Reviewed disposition held: attempt changed");
+  }
+  if (reason === "verified_historical_gatekeeper" && attempt === 1 && result === "voicemail_reached" && K === "N" &&
+      parseVoiceBotDate(row[39]) && normalizeString(row[40]) === "call_received_agent_hung_up" &&
+      [29, 30, 31, 34].every(i => !normalizeString(row[i]))) {
+    return { callResult: "gatekeeper_admin_early_exit", leadStatusCode: K };
   }
   if (reason === "verified_final_decline" && result === "contact_request_review" && !K) {
     return { callResult: "answered_not_interested", leadStatusCode: "R" };
@@ -36,6 +41,9 @@ export async function verifyReviewedDisposition(row: unknown[], attempt: number,
     : classifier.getAuthoritativeTerminalCallResult(conversation, attempt,
       { firstName: normalizeString(row[0]), lastName: normalizeString(row[1]), email: normalizeString(row[3]) });
   if (actual !== target.callResult || classifier.shouldTreatAsDoNotCall(conversation) ||
-      classifier.getExplicitCallbackConsent(conversation)) throw new Error("Reviewed disposition final receipt does not prove the requested classification");
+      classifier.getExplicitCallbackConsent(conversation) ||
+      (reason === "verified_historical_gatekeeper" && classifier.getVoiceContactRequestResult(conversation))) {
+    throw new Error("Reviewed disposition final receipt does not prove the requested classification");
+  }
   return { ...target, responseStatus: classifier.buildVoiceResponseStatus(target.callResult) };
 }

@@ -136,9 +136,16 @@ function isReportedOrConditional(text: string): boolean {
     || /\b(?:i(?:'m| am) (?:just )?(?:reading|quoting)|(?:the|this|a) (?:script|example|recording) (?:says|said)|(?:said|says) the following|not asking you to|i (?:didn't|did not) (?:say|ask)|i(?:'m| am) not (?:saying|asking))\b/.test(text);
 }
 
+function withoutNeutralClosingConditions(text: string): string {
+  // These office courtesies request no action; an actual goodbye is still required.
+  return text.replace(/\bsomeone from [a-z0-9 '&-]{1,80} will get back to you if needed\b/g,
+    value => value.replace(/ if needed$/, ""))
+    .replace(/(^|[.!;]\s*)if you need anything else,? just call back[.!;]?(?=\s*(?:take care|goodbye|bye|have a (?:good|nice) day|$))/g, "$1");
+}
+
 function isGoodbye(clauses: string[]): boolean {
   const last = withoutPunctuation(clauses.at(-1) ?? "").replace(/,/g, " ").replace(/\s+/g, " ").trim();
-  return /^(?:(?:ok(?:ay)?|alright|all right|no thanks|no thank you|thanks|thank you|that's all|that is all|have a (?:good|nice) day|but) )*(?:bye(?: bye)?|goodbye|have a (?:good|nice) day)(?: (?:thanks|thank you))?$/.test(last)
+  return /^(?:(?:ok(?:ay)?|alright|all right|no thanks|no thank you|thanks|thank you|that's all|that is all|have a (?:good|nice) day|but) )*(?:bye(?: bye)?|goodbye|take care|have a (?:good|nice) day)(?: (?:thanks|thank you))?$/.test(last)
     || /^(?:ok(?:ay)?[, ]+)?(?:that's all|that is all|that's everything|that is everything)$/.test(last);
 }
 
@@ -170,11 +177,12 @@ export function assessElevenLabsTerminalPermission(input: unknown, requestId = r
   const latest = normalize(callerMessages.at(-1) ?? "");
   if (!latest || !/[a-z]/i.test(latest)) return { ...response, decision: "no_caller_words" };
   response.latest_user_turn_hash = createHash("sha256").update(JSON.stringify([input.conversation_id, callerMessages])).digest("hex");
-  const clauses = latest.split(/(?<=[.!?;])|\b(?:but|actually)\b|\band (?=(?:please )?(?:stop|end|hang|disconnect|remove|take|never|do not|don't|no more)\b)/)
+  const endingText = withoutNeutralClosingConditions(latest);
+  const clauses = endingText.split(/(?<=[.!?;])|\b(?:but|actually)\b|\band (?=(?:please )?(?:stop|end|hang|disconnect|remove|take|never|do not|don't|no more)\b)/)
     .map((clause) => clause.replace(/^[,\s]+|[,\s]+$/g, "")).filter(Boolean);
   // Recordings and reported examples are not live instructions, even if they contain STOP.
   if (isHold(latest) || hasUnresolvedRecordingContext(callerMessages)) return { ...response, decision: "recording_or_hold" };
-  if (isReportedOrConditional(latest) || hasOpenQuotation(callerMessages)) return { ...response, decision: "pending_question_or_correction" };
+  if (isReportedOrConditional(endingText) || hasOpenQuotation(callerMessages)) return { ...response, decision: "pending_question_or_correction" };
   const stopIndex = explicitStopIndex(clauses, entries);
   if (stopIndex >= 0) {
     // A later wait/question/revocation must not be lost behind an earlier ending request.

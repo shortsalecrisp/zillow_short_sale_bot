@@ -2,6 +2,39 @@
 
 Current revision is r15, verified at 2026-11-03T13:26:42.725Z (November 3 at 8:26:42 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r15.
 
+## Shared Backend Ending And Gatekeeper Repair, November 3
+
+Yoni approved fixing Harrison row6587's repeated goodbyes and row6549's office-responder
+classification, without calling Harrison again. The detailed nested provider trace supersedes
+the earlier top-level-tool-only diagnosis: reset and validation DID run, but the validator
+returned pending_question_or_correction for the neutral office courtesy "Someone from ...
+will get back to you if needed." Maya returned to the conversation and repeated closing speech.
+
+The validator now disregards only that exact neutral conditional shape, and the closing
+courtesy "If you need anything else, just call back" before a genuine farewell. An actual
+goodbye/take-care closing remains required. Conditional callback requests, pending questions,
+holds, revocations, quoted speech and recordings still deny ending. The authenticated
+history, reset/validate chain and strict typed permission routing are unchanged. A stateless
+decision replay of an already completed call cannot dial or hang up a phone.
+
+Weak voicemail inference now uses actual caller speech rather than an assistant's own offer
+to leave a message or a summary of that offer. Real mailbox/tool/menu evidence retains priority.
+A brokerage pickup with punctuation or a transcribed stutter before "how can I help you"
+can establish an office responder, not target-agent identity. Genuine callback, information,
+opt-out, takeover and later live-agent evidence retain their existing priority.
+
+The guarded verified_historical_gatekeeper reconciliation requires a formerly voicemail_reached
+first attempt, existing exhausted K=N/cleared cold cadence, both genuine exact current-phone
+receipts, fresh state hash and no protected or later conflicting preference. It changes ONLY
+AH and AP with an audit; J, K, the second-call outcome, all real sent fields, preferences and
+scheduling remain unchanged. No raw Sheet override or first/third call is authorized. Harrison's
+K=N and exhausted cadence remain untouched; do not call him again.
+
+This is a shared backend repair, not a provider/TTS release: all r15 prompts, opening/recovery
+workflow, tools, audio, exact versions/hashes, native 50/50 split and original boundary above
+remain unchanged. Record the backend deployment cutover separately in analysis; never attribute
+this ending/classification change to TTS or reset the r15 sample. No publisher is invoked.
+
 ## Approved Revision 15: Prompt-Length Repair
 
 The canonical business prompt is condensed from 6,539 to 6,286 whitespace-delimited words.

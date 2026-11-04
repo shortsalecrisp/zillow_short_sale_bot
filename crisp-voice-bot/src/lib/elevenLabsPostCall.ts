@@ -1340,7 +1340,9 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     return true;
   }
 
-  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  // An assistant's offer to leave a message is not evidence of a mailbox.
+  const callerWords = userMessages(conversation).filter(hasMeaningfulSpokenContent);
+  const text = normalizeText(callerWords.length ? callerWords.join(" ") : conversation.analysis?.transcript_summary ?? "");
   return (
     text.includes("voicemail") ||
     text.includes("voice mail") ||
@@ -1860,6 +1862,7 @@ export function hasLiveHumanGatekeeperEvidence(
   );
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
+    if (/^[a-z0-9 '&-]{2,60}\b(?:realty|real estate|brokerage)[.!?, ]+(?:[a-z]-\s*)?how (?:can|may) i help (?:you|ya)\b/.test(text)) return true;
     const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
     const namedOfficeGreeting = text.match(
       /^(?:thank you for calling|welcome to)\s+(.{2,80}?)[.!?]\s*this is\s+([a-z][a-z'-]*)[.!?, ]+\s*how (?:can|may) i help (?:you|ya)\b/,

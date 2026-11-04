@@ -7,6 +7,26 @@ const history = (messages: string[]) => JSON.stringify({ "x-elevenlabs-history":
   entries: messages.flatMap((message) => [{ role: "user", message }, { role: "agent", message: "Understood." }]) });
 const assess = (message: string) => assessElevenLabsTerminalPermission({ conversation_id, history: history([message]) }, "unit-test");
 
+test("office message completion and a harmless conditional courtesy can end without a goodbye loop", () => {
+  for (const message of [
+    "Understood. I'll pass along that Yoni from Crisp Short Sales can assist with the short sale process. Someone from Synthetic Realty will get back to you if needed. Thanks for calling Synthetic Realty. Have a good day.",
+    "Goodbye. If you need anything else, just call back. Take care.",
+    "Goodbye. Take care.",
+  ]) {
+    const result = assess(message);
+    assert.equal(result.permission, true, message);
+    assert.equal(result.decision, "caller_goodbye");
+  }
+  for (const message of [
+    "Goodbye. If you need anything else, call me back tomorrow.",
+    "If I say goodbye, please end this call.",
+    "Someone from Synthetic Realty will get back to you if needed. Wait, what is your fee?",
+    "Goodbye. If you need anything else, just call back. Before you go, can you email me?",
+    "Please hold. Goodbye. If you need anything else, just call back. Take care.",
+    "I am reading a script. Goodbye. If you need anything else, just call back. Take care.",
+  ]) assert.equal(assess(message).permission, false, message);
+});
+
 for (const message of [
   "That is the callback request. No transfer now.", "2 p.m. Central on this number.",
   "Not Eastern, two Pacific, and use this number.", "Not a callback. I only asked who pays the fee.",

@@ -133,6 +133,62 @@ test("reviewed classification writes require independent proof/fresh state and c
   }
 });
 
+test("historical gatekeeper reconciliation changes only first result and audit after both exact receipts", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { voiceReconciliationStateHash } = await import("../src/lib/voiceOutcomeRecovery");
+  const { buildVoiceBotListingAddress } = await import("../src/lib/voiceSheet");
+  const { config } = await import("../src/lib/config");
+  const r = row();
+  Object.assign(r, { 9: "Latest second-call status", 10: "N", 29: "", 30: "", 31: "", 39: "2026-10-30T19:00Z", 40: "call_received_agent_hung_up" });
+  r[41] = metrics(String(r[2]), 1, "conv_currentfirst") + "\n" + metrics(String(r[2]), 2, "conv_currentsecond");
+  const original = [...r], fetched: string[] = [], written: number[] = [];
+  let laterPreference = false;
+  const receipt = (id: string) => {
+    const attempt = id === "conv_currentfirst" ? 1 : 2;
+    return { conversation_id: id, agent_id: config.elevenLabs.agentId, status: "done",
+      metadata: { start_time_unix_secs: Date.parse(String(r[attempt === 1 ? 32 : 39])) / 1000 + 5,
+        accepted_time_unix_secs: Date.parse(String(r[attempt === 1 ? 32 : 39])) / 1000 + 5, call_duration_secs: 30,
+        phone_call: { external_number: r[2], direction: "outbound" } },
+      conversation_initiation_client_data: { dynamic_variables: { rowNumber: 7000, callAttemptNumber: attempt, phone: r[2], requestedPhone: r[2] } },
+      transcript: attempt === 1 ? [
+        { role: "user", message: "Synthetic Realty. H- how can I help you?" },
+        { role: "agent", message: "Is Synthetic Owner available?" },
+        { role: "user", message: "They are not available right now." },
+        { role: "agent", message: "I can leave a message." },
+      ] : [{ role: "user", message: laterPreference ? "Please don't call me again." : "Hello?" }],
+    };
+  };
+  const sheets = { spreadsheets: { values: {
+    get: async ({ range }: any) => ({ data: { values: String(range).includes("sms_inbound_queue") ? [] : [[...r]] } }),
+    batchUpdate: async ({ requestBody }: any) => { for (const d of requestBody.data) {
+      const letters = d.range.match(/!([A-Z]+)7000$/)[1]; let column = 0; for (const c of letters) column = column * 26 + c.charCodeAt(0) - 64;
+      written.push(column); r[column - 1] = d.values[0][0];
+    } },
+  } } };
+  const updates = () => ({ callAttemptNumber: 1, callResult: "gatekeeper_admin_early_exit", leadStatusCode: "N",
+    voiceReviewedDisposition: "verified_historical_gatekeeper" as const,
+    voiceExpectedStateHash: voiceReconciliationStateHash(r), voiceReviewedSecondReceipt: "conv_currentsecond",
+    voiceTerminalReceipt: { conversationId: "conv_currentfirst", phone: String(r[2]), fullName: "Synthetic Owner", listingAddress: buildVoiceBotListingAddress(r) },
+    voiceNotes: "Exact conv_currentfirst reviewed; old metrics are historical." });
+  const getReceipt = async (id: string) => { fetched.push(id); return receipt(id); };
+  await assert.rejects(updateVoiceLeadRow(7000, { ...updates(), voiceReviewedSecondReceipt: undefined }, async () => sheets as never, getReceipt), /both exact receipts/);
+  assert.deepEqual(written, []);
+  await updateVoiceLeadRow(7000, updates(), async () => sheets as never, getReceipt);
+  assert.deepEqual(written, [34, 42]);
+  assert.equal(r[33], "gatekeeper_admin_early_exit");
+  assert.match(String(r[41]), /verified_historical_gatekeeper/);
+  for (let i = 0; i < 45; i++) if (![33, 41].includes(i)) assert.equal(r[i], original[i], `unchanged column ${i + 1}`);
+  r.splice(0, r.length, ...original); written.length = 0; laterPreference = true;
+  await assert.rejects(updateVoiceLeadRow(7000, updates(), async () => sheets as never, getReceipt), /later protected/);
+  assert.deepEqual(written, []);
+  laterPreference = false;
+  for (const i of [13, 16, 19, 28, 35, 36, 37, 38, 43, 44]) {
+    r[i] = "yes";
+    await assert.rejects(updateVoiceLeadRow(7000, updates(), async () => sheets as never, getReceipt), /protected/);
+    r[i] = original[i];
+  }
+});
+
 test("identity release requires exact current-number sent receipts and owning times, not old sent flags", async () => {
   const { reviewedIdentitySmsProof, assertReviewedIdentityState } = await import("../src/lib/voiceReviewedIdentity");
   const r = row(); r[32] = ""; r[33] = "";
