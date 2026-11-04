@@ -3093,6 +3093,27 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isExplicitVoiceMessageRequestSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent explicitly requested a voice text, voice note, or audio message; no automated text or call was inferred",
+      "VOICE MESSAGE REQUEST"
+    );
+  }
+
+  if (isListingStatusUpdateSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "Got it. I hope the contract goes smoothly.",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "closed_no_interest",
+      reason: "Acknowledged an under-contract or MLS status update without inferring existing short-sale help"
+    };
+  }
+
   if (isCategoricalBuyerFeeRejectionSignal_(t)) {
     return {
       matched: true,
@@ -5326,11 +5347,32 @@ function isAlreadyHandledSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   return /\bsigned agreement\b/.test(t) ||
     /\balready signed\b/.test(t) ||
-    /\balready under contract\b/.test(t) ||
     /\bwe are dealing directly with the bank\b/.test(t) ||
     /\bwe're dealing directly with the bank\b/.test(t) ||
     /\bworking with the bank already\b/.test(t) ||
     /^no[,.]?\s+.+\b(?:with|through|using)\b.+$/.test(t);
+}
+
+function isListingStatusUpdateSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /[?]/.test(t) || isPaymentOrFeeQuestionSignal_(t) ||
+      isDirectHelpRequestSignal_(t) || isPhoneCallInterestSignal_(t) ||
+      isPresentServiceInterestSignal_(t) || isSchedulingSignal_(t)) return false;
+  const contractStatus = /\b(?:going|goes|went|is|it['’]?s|already)\s+under\s+contract\b/.test(t) ||
+    /\b(?:got|has|have)\s+(?:a\s+)?(?:signed|executed)\s+contract\b/.test(t);
+  const mlsStatus = /\b(?:change|update|correct|mark)\b.{0,45}\b(?:status|mls)\b/.test(t) ||
+    /\bmls\b.{0,45}\b(?:status|pending|under contract)\b/.test(t);
+  return contractStatus || (mlsStatus && /\b(?:contract|pending|status)\b/.test(t));
+}
+
+function isExplicitVoiceMessageRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const voiceArtifact = /\b(?:voice\s*(?:text|note|message|memo)|audio\s*(?:text|note|message|memo)|recorded\s+(?:note|message))\b/.test(t);
+  const request = /\b(?:can|could|would|will)\s+you\b.{0,35}\b(?:send|record|leave|text)\b/.test(t) ||
+    /\b(?:please\s+)?(?:send|record|leave|text)\b.{0,35}\b(?:me|us)\b/.test(t) ||
+    /\b(?:i|we)\s+(?:want|would like|need)\b.{0,35}\b(?:voice|audio|recorded)\b/.test(t);
+  return voiceArtifact && request;
 }
 
 function isSellerBuyerRepresentationOnlySignal_(text) {

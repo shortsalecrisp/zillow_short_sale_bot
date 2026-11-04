@@ -4757,6 +4757,7 @@ SMS_ALREADY_HAS_HELP_REPLY = (
     "Totally understand. Glad you already have help on it. If anything changes or the file stalls, "
     "please keep me in mind. I'm happy to be backup."
 )
+SMS_LISTING_STATUS_UPDATE_REPLY = "Got it. I hope the contract goes smoothly."
 EQUATOR_PORTAL_REPLY = (
     "I'm familiar with Equator and can help manage the lender-side tasks and communication."
 )
@@ -7058,6 +7059,43 @@ def _sms_provider_aware_closeout_reply(value: Any) -> str:
     return SMS_STANDARD_CLOSEOUT_REPLY
 
 
+def _sms_is_listing_status_update(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if (
+        not text
+        or "?" in text
+        or _sms_is_fee_question(text)
+        or _sms_is_phone_call_interest(text)
+        or _sms_is_present_service_interest(text)
+        or _sms_is_scheduled_callback(text)
+        or bool(re.search(r"\b(?:need|want|could use|would like)\b.{0,35}\b(?:help|assistance)\b", text))
+    ):
+        return False
+    contract_status = bool(
+        re.search(r"\b(?:going|goes|went|is|it's|already)\s+under\s+contract\b", text)
+        or re.search(r"\b(?:got|has|have)\s+(?:a\s+)?(?:signed|executed)\s+contract\b", text)
+    )
+    mls_status = bool(
+        re.search(r"\b(?:change|update|correct|mark)\b.{0,45}\b(?:status|mls)\b", text)
+        or re.search(r"\bmls\b.{0,45}\b(?:status|pending|under contract)\b", text)
+    )
+    return contract_status or (mls_status and bool(re.search(r"\b(?:contract|pending|status)\b", text)))
+
+
+def _sms_is_explicit_voice_message_request(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    voice_artifact = bool(re.search(
+        r"\b(?:voice\s*(?:text|note|message|memo)|audio\s*(?:text|note|message|memo)|recorded\s+(?:note|message))\b",
+        text,
+    ))
+    request = bool(
+        re.search(r"\b(?:can|could|would|will)\s+you\b.{0,35}\b(?:send|record|leave|text)\b", text)
+        or re.search(r"\b(?:please\s+)?(?:send|record|leave|text)\b.{0,35}\b(?:me|us)\b", text)
+        or re.search(r"\b(?:i|we)\s+(?:want|would like|need)\b.{0,35}\b(?:voice|audio|recorded)\b", text)
+    )
+    return voice_artifact and request
+
+
 def _sms_is_first_file_credit_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(re.search(
@@ -7861,6 +7899,33 @@ def _sms_fast_decision(
             block_reply=True,
             clear_callback=True,
             reason="Opt-out / stop request",
+        )
+
+    if _sms_is_explicit_voice_message_request(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            alert_needed=True,
+            block_reply=True,
+            handoff_type="VOICE MESSAGE REQUEST",
+            call_booking_status="interested_no_call",
+            reason=(
+                "Agent explicitly requested a voice text, voice note, or audio message; "
+                "no automated text or call was inferred"
+            ),
+        )
+
+    if _sms_is_listing_status_update(t):
+        return _sms_decision(
+            reply_text=SMS_LISTING_STATUS_UPDATE_REPLY,
+            lead_status="R",
+            conversation_done=True,
+            call_booking_status="closed_no_interest",
+            clear_callback=True,
+            reason=(
+                "Acknowledged an under-contract or MLS status update without inferring "
+                "existing short-sale help"
+            ),
         )
 
     last_outbound = _sms_normalize_whitespace(row_obj.get("last_outbound_text")).lower()
