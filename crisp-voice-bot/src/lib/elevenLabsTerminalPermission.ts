@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { looksLikeCallEndingRequest } from "./elevenLabsDoNotCall";
+import { isAutomatedMessageTakerConversation } from "./elevenLabsRecordingState";
 
 export const MAX_TERMINAL_HISTORY_BYTES = 256 * 1024;
 const MAX_ENTRIES = 2000;
@@ -8,7 +9,7 @@ const MAX_MESSAGE_LENGTH = 12000;
 type HistoryEntry = { role: "user" | "agent" | "tool"; message?: string };
 type EndDecision = "invalid_input" | "no_caller_words" | "recording_or_hold" | "explicit_stop"
   | "pending_question_or_correction" | "caller_goodbye" | "service_declined"
-  | "no_ending_request";
+  | "automated_message_complete" | "no_ending_request";
 
 export type TerminalPermission = {
   ok: boolean;
@@ -180,6 +181,9 @@ export function assessElevenLabsTerminalPermission(input: unknown, requestId = r
   const endingText = withoutNeutralClosingConditions(latest);
   const clauses = endingText.split(/(?<=[.!?;])|\b(?:but|actually)\b|\band (?=(?:please )?(?:stop|end|hang|disconnect|remove|take|never|do not|don't|no more)\b)/)
     .map((clause) => clause.replace(/^[,\s]+|[,\s]+$/g, "")).filter(Boolean);
+  if (isAutomatedMessageTakerConversation(entries)) {
+    return { ...response, permission: true, decision: "automated_message_complete" };
+  }
   // Recordings and reported examples are not live instructions, even if they contain STOP.
   if (isHold(latest) || hasUnresolvedRecordingContext(callerMessages)) return { ...response, decision: "recording_or_hold" };
   if (isReportedOrConditional(endingText) || hasOpenQuotation(callerMessages)) return { ...response, decision: "pending_question_or_correction" };

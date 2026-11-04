@@ -15,7 +15,7 @@ import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContex
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "./elevenLabsDoNotCall";
-import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
@@ -896,6 +896,7 @@ export function shouldTreatAsRecordingArtifact(conversation: ElevenLabsConversat
 }
 
 export function shouldTreatAsRecordedScreenerTerminal(conversation: ElevenLabsConversation): boolean {
+  if (isAutomatedMessageTakerConversation(conversation.transcript ?? [])) return true;
   if (hasLiveHumanAfterAutomatedScreening(conversation)) return false;
   const messages = userMessages(conversation).map(normalizeText);
   const hasScreeningPrompt = messages.some((text) =>
@@ -2381,6 +2382,7 @@ async function processPostCallOutcomeForConversationUnlocked(
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
   const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
   const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
+  const automatedMessageTaker = isAutomatedMessageTakerConversation(conversation.transcript ?? []);
   const terminalCallResult = getAuthoritativeTerminalCallResult(conversation, metadata.callAttemptNumber, {
     firstName: expectedFirstName,
     lastName: metadata.lastName,
@@ -2413,6 +2415,7 @@ async function processPostCallOutcomeForConversationUnlocked(
           responseStatus: outcome,
           ...(["answered_not_interested", "identity_mismatch_voicemail"].includes(terminalCallResult)
             ? { leadStatusCode: "R" } : {}),
+          ...(automatedMessageTaker ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "apparent_human_early_exit" ? { leadStatusCode: "N" } : {}),
           ...(isFinalUnansweredVoiceResult(terminalCallResult, metadata.callAttemptNumber)
             ? { leadStatusCode: "N" } : {}),
@@ -2618,8 +2621,8 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  const gatekeeperAdminEarlyExit = shouldTreatAsGatekeeperAdminEarlyExit(conversation, expectedFirstName);
-  if (gatekeeperAdminEarlyExit || shouldTreatAsAgentUnavailable(conversation, expectedFirstName) || shouldTreatAsUnrelatedLiveBusiness(conversation, expectedFirstName)) {
+  const gatekeeperAdminEarlyExit = !automatedMessageTaker && shouldTreatAsGatekeeperAdminEarlyExit(conversation, expectedFirstName);
+  if (automatedMessageTaker || gatekeeperAdminEarlyExit || shouldTreatAsAgentUnavailable(conversation, expectedFirstName) || shouldTreatAsUnrelatedLiveBusiness(conversation, expectedFirstName)) {
     const callResult = gatekeeperAdminEarlyExit ? "gatekeeper_admin_early_exit" : "agent_not_available";
     const outcome = buildVoiceResponseStatus(callResult);
 
@@ -2628,7 +2631,7 @@ async function processPostCallOutcomeForConversationUnlocked(
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
       responseStatus: outcome,
-      ...(metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
+      ...(automatedMessageTaker || metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
       callbackRequested: "",
       callbackTime: "",
       liveTransferRequested: "",
@@ -2651,6 +2654,7 @@ async function processPostCallOutcomeForConversationUnlocked(
       callAttemptNumber: metadata.callAttemptNumber,
       summary,
       callResult,
+      automatedMessageTaker,
     });
     return true;
   }

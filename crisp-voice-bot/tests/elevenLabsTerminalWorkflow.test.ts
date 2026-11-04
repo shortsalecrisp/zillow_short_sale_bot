@@ -164,6 +164,8 @@ test("all model contexts lose direct end_call while existing transfer and voicem
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /NEW live caller turn/);
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /no unanswered question, correction, revocation/);
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /use the contact-recording path instead/);
+  assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /staged automated receptionist/);
+  assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /Never continue a goodbye exchange/);
 });
 
 test("all reachable dialogue and recovery models hide native-only tools while the registry remains intact", () => {

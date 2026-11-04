@@ -1,5 +1,5 @@
 import type { CallMetadata } from "../types";
-import { isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
 import {
   hasCallbackOrLaterSignal,
   hasClearLiveTransferConsent,
@@ -159,6 +159,17 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
   const targetIndexes = new Set<number>();
   let lastAssistantMessage = "";
   let hasSpokenUserContent = false;
+
+  if (isAutomatedMessageTakerConversation(transcript)) {
+    transcript.forEach((item, index) => {
+      if (item.role === "user" && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message)) {
+        automatedIndexes.add(index);
+        hasSpokenUserContent = true;
+      }
+    });
+    return { humanIndexes, automatedIndexes, hasSpokenUserContent, humanAnswered: false,
+      targetAgentAnswered: false, category: "screening", gatekeeper: false, automation: ["screening"] as AutomatedContact[] };
+  }
 
   const flush = (beforeAutomation: boolean) => {
     // A greeting split from the rest of a recording is not a human pickup.

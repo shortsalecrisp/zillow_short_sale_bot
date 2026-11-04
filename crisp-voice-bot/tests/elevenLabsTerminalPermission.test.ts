@@ -27,6 +27,21 @@ test("office message completion and a harmless conditional courtesy can end with
   ]) assert.equal(assess(message).permission, false, message);
 });
 
+test("a completed staged message-taking receptionist authorizes one terminal exit", () => {
+  const entries = [
+    { role: "user", message: "Would you like me to pass a message? What is the best number to reach you back?" },
+    { role: "agent", message: "Yoni at Crisp Short Sales, 404-300-9526." },
+    { role: "user", message: "Just to confirm, you want me to let Harrison know Yoni can help?" },
+    { role: "agent", message: "That is correct." },
+    { role: "user", message: "I'll pass that message along. Someone from Sold By Harrison will get back to you if needed. Have a good day." },
+  ];
+  const result = assessElevenLabsTerminalPermission({ conversation_id, history: JSON.stringify({
+    "x-elevenlabs-history": true, entries,
+  }) });
+  assert.equal(result.permission, true);
+  assert.equal(result.decision, "automated_message_complete");
+});
+
 for (const message of [
   "That is the callback request. No transfer now.", "2 p.m. Central on this number.",
   "Not Eastern, two Pacific, and use this number.", "Not a callback. I only asked who pays the fee.",

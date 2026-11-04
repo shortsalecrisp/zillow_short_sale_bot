@@ -3,6 +3,33 @@ export type RecordingStateTranscriptItem = {
   message?: string | null;
 };
 
+export function isAutomatedMessageTakerConversation(
+  transcript: RecordingStateTranscriptItem[],
+): boolean {
+  const messages = transcript
+    .filter((item) => item.role === "user" && typeof item.message === "string")
+    .map((item) => normalizeText(item.message!))
+    .filter(Boolean);
+  const offerIndex = messages.findIndex((text) =>
+    /\b(?:would you like me to|i can|may i)\s+(?:pass along|pass|take|leave)\s+(?:a|the|your)?\s*message\b/.test(text) &&
+    /\b(?:best|callback|phone|direct)?\s*(?:number|way)\s+to\s+(?:reach|contact)\b/.test(text),
+  );
+  if (offerIndex < 0) return false;
+  const confirmationIndex = messages.findIndex((text, index) => index > offerIndex &&
+    /\b(?:just to confirm|let me confirm|to confirm)\b/.test(text) &&
+    /\b(?:you want me to|i should|i will)\b.{0,100}\b(?:let|tell|notify|message|pass)\b/.test(text),
+  );
+  if (confirmationIndex < 0) return false;
+  const completionIndex = messages.findIndex((text, index) => index > confirmationIndex &&
+    /\b(?:i(?:'ll| will) pass (?:that message|this message|that|this|it|the message) along|i(?:'ll| will) let .{1,60} know|message (?:has been|is) recorded)\b/.test(text) &&
+    /\b(?:someone from .{1,80} will get back to you if needed|thanks for calling|have a (?:good|great|nice) day|goodbye|take care)\b/.test(text),
+  );
+  if (completionIndex < 0) return false;
+  const latest = messages.at(-1) ?? "";
+  return completionIndex === messages.length - 1 ||
+    /^(?:(?:thank you|thanks|goodbye|bye|take care|have a (?:good|great|nice) day|if you need anything else|feel free to (?:call|reach out))[.!?, ]*)+$/.test(latest);
+}
+
 function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
@@ -64,6 +91,7 @@ export function isRecordingOrScreeningArtifact(
   transcript: RecordingStateTranscriptItem[],
   summary = "",
 ): boolean {
+  if (isAutomatedMessageTakerConversation(transcript)) return true;
   const messages = transcript
     .filter((item) => item.role === "user" && typeof item.message === "string")
     .map((item) => item.message!.trim())

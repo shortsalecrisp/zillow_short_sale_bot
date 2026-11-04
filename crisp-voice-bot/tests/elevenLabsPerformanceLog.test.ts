@@ -183,6 +183,25 @@ test("terminal outcome precedence drives the metrics contact bucket", async () =
   assert.equal(gatekeeper.contactEvidence.targetAgentAnswered, false);
 });
 
+test("a completed staged message taker is measured as automated screening", async () => {
+  const result = await measurementLog({
+    metadata: { fullName: "Harrison Green" },
+    terminalCallResult: "agent_not_available",
+    conversation: { transcript: [
+      { role: "user", message: "Would you like me to pass a message to Sold By Harrison? What is the best number to reach you back?" },
+      { role: "agent", message: "Yoni at Crisp Short Sales, 404-300-9526." },
+      { role: "user", message: "Just to confirm, you want me to let Harrison know Yoni can help?" },
+      { role: "agent", message: "That is correct." },
+      { role: "user", message: "I'll pass that message along. Someone from Sold By Harrison will get back to you if needed. Have a good day." },
+    ] },
+  });
+  assert.equal(result.contactEvidence.reviewBucket, "recorded_screener");
+  assert.equal(result.contactEvidence.humanAnswered, false);
+  assert.equal(result.contactEvidence.targetAgentAnswered, false);
+  assert.equal(result.contactEvidence.gatekeeper, false);
+  assert.deepEqual(result.contactEvidence.humanTurnIndexes, []);
+});
+
 test("performance evidence counts a named live human reached after screening", async () => {
   const parsed = await measurementLog({ metadata: { fullName: "Amelia Colonna" }, conversation: { transcript: [
     { role: "user", message: "Please state your name and reason for calling, then stay on the line." },

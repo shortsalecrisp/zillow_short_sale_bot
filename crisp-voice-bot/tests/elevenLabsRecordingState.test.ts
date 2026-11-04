@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isRecordingOrScreeningArtifact, isRepeatedPhoneMenuFragment } from "../src/lib/elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRecordingOrScreeningArtifact, isRepeatedPhoneMenuFragment } from "../src/lib/elevenLabsRecordingState";
 
 const menu = "Thank you for calling Synthetic Realty. For buying or selling, press one. For property management, press two.";
 
@@ -30,4 +30,21 @@ test("a first-person voicemail promise plus mailbox menu is not live callback co
     "Please stop calling me.", "No thanks, I already have help.", "Please email me instead."]) {
     assert.equal(isRecordingOrScreeningArtifact([...transcript, { role: "user", message }]), false);
   }
+});
+
+test("a staged receptionist that confirms a message then closes is an automated artifact", () => {
+  const transcript = [
+    { role: "user", message: "Would you like me to pass a message to Sold By Harrison? If so, what is the best number to reach you back?" },
+    { role: "agent", message: "Yoni at Crisp Short Sales can answer questions. His number is 404-300-9526." },
+    { role: "user", message: "Just to confirm, you want me to let Sold By Harrison know Yoni can help with the short-sale process?" },
+    { role: "agent", message: "That is correct, thank you." },
+    { role: "user", message: "Understood. I'll pass that message along. Someone from Sold By Harrison will get back to you if needed. Thanks for calling. Have a good day." },
+  ];
+  assert.equal(isAutomatedMessageTakerConversation(transcript), true);
+  assert.equal(isRecordingOrScreeningArtifact(transcript), true);
+  const liveAdmin = transcript.slice(0, 2).concat([
+    { role: "user", message: "Which property is this about, and what service do you provide?" },
+  ]);
+  assert.equal(isAutomatedMessageTakerConversation(liveAdmin), false);
+  assert.equal(isRecordingOrScreeningArtifact(liveAdmin), false);
 });

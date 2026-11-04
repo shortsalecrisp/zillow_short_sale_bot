@@ -1878,6 +1878,51 @@ test("first-person recorded email instructions override a misfired information h
   }
 });
 
+test("a completed staged message taker suppresses retry and is not a live gatekeeper", async () => {
+  const {
+    getAuthoritativeTerminalCallResult,
+    processPostCallOutcomeFromConversationId,
+    shouldTreatAsRecordedScreenerTerminal,
+    shouldTreatAsVoicemail,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_staged_message_taker";
+  const updates: Array<Record<string, unknown>> = [];
+  const conversation = {
+    conversation_id: conversationId,
+    status: "done",
+    metadata: { call_duration_secs: 58, termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "An automated receptionist accepted and confirmed a message for Harrison." },
+    conversation_initiation_client_data: { dynamic_variables: {
+      rowNumber: 123, callAttemptNumber: 1, agentName: "Harrison Green",
+      listingAddress: "123 Fictional Street", phone: "+12025550123", testMode: true,
+    } },
+    transcript: [
+      { role: "user", message: "Would you like me to pass a message to Sold By Harrison? If so, what is the best number to reach you back?" },
+      { role: "agent", message: "Yoni at Crisp Short Sales can answer questions. His number is 404-300-9526." },
+      { role: "user", message: "Just to confirm, you want me to let Sold By Harrison know Yoni can help with the short-sale process?" },
+      { role: "agent", message: "That is correct, thank you." },
+      { role: "user", message: "Understood. I'll pass that message along. Someone from Sold By Harrison will get back to you if needed. Thanks for calling. Have a good day." },
+    ],
+  };
+  measurementConversations.set(conversationId, conversation);
+  try {
+    assert.equal(shouldTreatAsVoicemail(conversation), false);
+    assert.equal(shouldTreatAsRecordedScreenerTerminal(conversation), true);
+    assert.equal(getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Harrison" }), "agent_not_available");
+    assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+      requestQueueRefill,
+      postSheetUpdate: async payload => { updates.push(payload as Record<string, unknown>); },
+    }), true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].callResult, "agent_not_available");
+    assert.equal(updates[0].leadStatusCode, "N");
+    assert.equal(updates[0].callbackRequested, "");
+    assert.equal(updates[0].liveTransferRequested, "");
+  } finally {
+    measurementConversations.delete(conversationId);
+  }
+});
+
 test("invalid destination failure requests contact review, not an unanswered N or a retry", async () => {
   const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
   const conversationId = "conv_measurement_invalid_destination";

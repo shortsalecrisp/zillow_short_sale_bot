@@ -5,6 +5,7 @@ import { bodyDigest, writableBody, extractPromptSection, verifyReleaseReadback }
 import { conversationControlTools, normalizeControlToolReadback } from "./elevenLabsConversationControlTools";
 import { applyContactToolDescriptions, applyConversationListeningPolicy, applyConversationToolPolicy, applyConversationConsentPolicy } from "../lib/elevenLabsConversationPolicy";
 import { applyConversationOpeningWorkflow, VOICE_STATE_TRANSITION_NODES } from "../lib/elevenLabsOpeningWorkflow";
+import { applyGuardedTerminalWorkflow } from "../lib/elevenLabsTerminalWorkflow";
 import { ELEVENLABS_TTS_CONTROL_BRANCH_ID, ELEVENLABS_TTS_TEST_BRANCH_ID, ELEVENLABS_TTS_CONTROL_MODEL, ELEVENLABS_TTS_TEST_MODEL } from "../lib/elevenLabsRuntimeExperiment";
 
 export function comparisonBody(body: any): any {
@@ -87,7 +88,7 @@ async function main(): Promise<void> {
     || bodyDigest(contact.tool_config) !== bodyDigest(applyContactToolDescriptions(contact.tool_config))) throw new Error("Contact policy mismatch");
   if (bodyDigest(owner.conversation_config.agent.prompt.tool_ids) !== bodyDigest(before[1].conversation_config.agent.prompt.tool_ids)) throw new Error("Tool bindings differ; separate review required");
   const prompt = extractPromptSection(await readFile(path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md"), "utf8"));
-  const shared = buildUniformRelease(owner, prompt);
+  const shared = applyGuardedTerminalWorkflow(buildUniformRelease(owner, prompt), control);
   const candidates = [ELEVENLABS_TTS_CONTROL_MODEL, ELEVENLABS_TTS_TEST_MODEL].map(model => {
     const body = structuredClone(shared); body.conversation_config.tts.model_id = model; return body;
   });
