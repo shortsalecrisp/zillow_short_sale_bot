@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   applyConversationOpeningWorkflow,
+  applyStagedMessageTakerOpeningPrompt,
   buildOpeningListenerPrompt,
   CALLBACK_RECEIPT_WAIT_PROMPT,
   OPENING_LISTENER_PROMPT,
@@ -102,6 +103,8 @@ test("screening, voicemail and unrelated recording exit remain separate", () => 
   assert.match(OPENING_LISTENER_PROMPT, /genuinely new live listener who has not heard your identity/);
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /We help listing agents with lender paperwork and follow-up/);
   assert.match(OPENING_LISTENER_PROMPT, /For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn/);
+  assert.match(OPENING_LISTENER_PROMPT, /staged message-taking receptionist is also automated/);
+  assert.match(OPENING_LISTENER_PROMPT, /After the first completed farewell, say exactly "Goodbye\." once/);
   assert.match(OPENING_LISTENER_PROMPT, /attempt two has no second message/);
   assert.equal(result.workflow.nodes.unrelated_recording_exit.type, "end");
   assert.equal(result.workflow.nodes.unrelated_recording_exit.return_when_nested, true);
@@ -110,6 +113,23 @@ test("screening, voicemail and unrelated recording exit remain separate", () => 
   assert.match(result.workflow.edges.opening_to_unrelated_recording_exit.forward_condition.condition, /actual automated VOICEMAIL/);
   assert.match(result.workflow.edges.opening_to_unrelated_recording_exit.forward_condition.condition, /A live assistant\/admin/);
   assert.deepEqual(result.workflow.edges.main_to_transfer, base().workflow.edges.main_to_transfer);
+});
+
+test("the staged message-taker provider patch changes only the opening prompt", () => {
+  const current: any = applyConversationOpeningWorkflow(base());
+  const node = current.workflow.nodes.opening_listener;
+  node.conversation_config.agent.prompt.prompt = node.conversation_config.agent.prompt.prompt.replace(
+    /\n\nA staged message-taking receptionist is also automated[\s\S]+?must not use this shortcut\./,
+    "",
+  );
+  const expected = structuredClone(current);
+  expected.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt =
+    buildOpeningListenerPrompt(current.conversation_config.agent.prompt.prompt);
+  assert.deepEqual(applyStagedMessageTakerOpeningPrompt(current), expected);
+  assert.deepEqual(applyStagedMessageTakerOpeningPrompt(expected), expected);
+  const drift = structuredClone(current);
+  drift.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt += " unreviewed";
+  assert.throws(() => applyStagedMessageTakerOpeningPrompt(drift), /drifted/);
 });
 
 test("opening application is idempotent and refuses a fixed greeting or unknown start", () => {

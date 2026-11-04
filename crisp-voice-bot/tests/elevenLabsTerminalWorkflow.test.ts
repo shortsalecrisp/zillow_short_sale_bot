@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyGuardedTerminalWorkflow, TERMINAL_GUARD_NODES as n } from "../src/lib/elevenLabsTerminalWorkflow";
+import { applyGuardedTerminalWorkflow, applyStagedMessageTakerTerminalCondition,
+  PREVIOUS_TERMINAL_ENDING_CONDITION, TERMINAL_ENDING_CONDITION,
+  TERMINAL_GUARD_NODES as n } from "../src/lib/elevenLabsTerminalWorkflow";
 
 const options = { resetToolId: "tool_reset", validateToolId: "tool_validate", contactToolId: "tool_contact", mainNodeId: "main" };
 function baseline(): any {
@@ -166,6 +168,26 @@ test("all model contexts lose direct end_call while existing transfer and voicem
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /use the contact-recording path instead/);
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /staged automated receptionist/);
   assert.match(after.workflow.edges.terminal_guard_from_main.forward_condition.condition, /Never continue a goodbye exchange/);
+});
+
+test("the paired provider release changes only reviewed terminal entry conditions", () => {
+  const contexts = ["main_conversation", "callback_after_unavailable", "patch_transfer", "opening_listener",
+    "short_listing_recovery", "callback_receipt_wait"];
+  const current: any = { conversation_config: { agent: { prompt: {} } }, workflow: { nodes: {}, edges: {} } };
+  for (const context of contexts) current.workflow.edges[`terminal_guard_from_${context}`] = {
+    source: context, target: n.reset, backward_condition: null,
+    forward_condition: { type: "llm", label: null, condition: PREVIOUS_TERMINAL_ENDING_CONDITION },
+  };
+  const expected = structuredClone(current);
+  for (const edge of Object.values(expected.workflow.edges) as any[]) {
+    edge.forward_condition.condition = TERMINAL_ENDING_CONDITION;
+  }
+  const after = applyStagedMessageTakerTerminalCondition(current);
+  assert.deepEqual(after, expected);
+  assert.deepEqual(applyStagedMessageTakerTerminalCondition(after), after);
+  const drift = structuredClone(current);
+  drift.workflow.edges.terminal_guard_from_main_conversation.forward_condition.condition = "unreviewed";
+  assert.throws(() => applyStagedMessageTakerTerminalCondition(drift), /drifted/);
 });
 
 test("all reachable dialogue and recovery models hide native-only tools while the registry remains intact", () => {

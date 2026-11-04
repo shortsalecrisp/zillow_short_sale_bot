@@ -32,6 +32,8 @@ Then stop. Do not repeat the callback time, say scheduled or booked, ask an anyt
 
 After that one acknowledgment, wait silently. Use skip_turn for silence, noise, placeholder ..., thanks, okay, repeated timing, self-talk or an incomplete fragment such as "Is it, or... Okay." A NEW complete live-caller question, correction, cancellation, stop request or contact preference routes to the main conversation before speech. Never repeat the receipt acknowledgment.`;
 
+export const STAGED_MESSAGE_TAKER_POLICY = `A staged message-taking receptionist is also automated when it offers to pass a message and asks for a callback number, restates the message for confirmation, then confirms it will pass the message and gives a farewell. Supply the message and return number only once. After the first completed farewell, say exactly "Goodbye." once and use the guarded ending path. Do not ask anything else, repeat the message, wait for another farewell, or continue a goodbye exchange. A live office admin who asks an unscripted property or service question remains a live gatekeeper and must not use this shortcut.`;
+
 export const OPENING_LISTENER_PROMPT = `# Opening listener entry
 
 Start with the pickup and introduction rules. This node shares the complete business policy above. Its label does not freeze the conversation at introduction: after a new caller turn use the shared post-intro, repair, admin, consent and ending rules even if the workflow has not yet transitioned to main_conversation. Never improvise a different qualification question because this node is still active.
@@ -52,7 +54,7 @@ Automated screening is not a human conversation. If a system asks for name and r
 "${VOICE_SCREENING_SCRIPT}"
 Then stop. For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn and wait for the person. If a system asks for a return number, say "${VOICE_RETURN_NUMBER_SPOKEN}" once, with a short pause between groups, then wait. Never pronounce 300 as three hundred. When the system connects a genuinely new live listener who has not heard your identity, say "${VOICE_NEW_LISTENER_RECOVERY}" once. A repeated hello or presence check from the same listener who already heard your identity gets only "${VOICE_SHORT_LISTING_RECOVERY}". Never repeat the screener response or full sales introduction.
 
-A staged message-taking receptionist is also automated when it offers to pass a message and asks for a callback number, restates the message for confirmation, then confirms it will pass the message and gives a farewell. Supply the message and return number only once. After the first completed farewell, say exactly "Goodbye." once and use the guarded ending path. Do not ask anything else, repeat the message, wait for another farewell, or continue a goodbye exchange. A live office admin who asks an unscripted property or service question remains a live gatekeeper and must not use this shortcut.
+${STAGED_MESSAGE_TAKER_POLICY}
 
 Actual voicemail is different from screening or hold. Let the recorded greeting finish. Use voicemail_detection at its invitation to leave a message or the first natural pause after it, not mid-sentence. The backend supplies the approved first-attempt message; attempt two has no second message. Do not speak a live introduction over a recording. A clearly unrelated person's recorded greeting must use the separate silent recording exit, without disclosing the property or leaving a message. A live admin, matching surname or plausible name match is not an unrelated recording.
 
@@ -61,6 +63,22 @@ A live stop request is not a recording. Do not pitch again; the main conversatio
 export function buildOpeningListenerPrompt(mainPrompt: string): string {
   if (!mainPrompt?.trim()) throw new Error("Full main conversation prompt is required for the opening listener");
   return [mainPrompt.trim(), OPENING_HANDOFF_POLICY, OPENING_LISTENER_PROMPT].join("\n\n");
+}
+
+export function applyStagedMessageTakerOpeningPrompt<T extends Record<string, any>>(agent: T): T {
+  const updated = structuredClone(agent);
+  const rootPrompt = updated.conversation_config?.agent?.prompt?.prompt;
+  const openingPrompt = updated.workflow?.nodes?.opening_listener?.conversation_config?.agent?.prompt?.prompt;
+  if (typeof rootPrompt !== "string" || typeof openingPrompt !== "string") {
+    throw new Error("Existing root and opening-listener prompts are required");
+  }
+  const nextPrompt = buildOpeningListenerPrompt(rootPrompt);
+  const previousPrompt = nextPrompt.replace(`\n\n${STAGED_MESSAGE_TAKER_POLICY}`, "");
+  if (openingPrompt !== previousPrompt && openingPrompt !== nextPrompt) {
+    throw new Error("Opening-listener prompt drifted from the reviewed predecessor");
+  }
+  updated.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt = nextPrompt;
+  return updated;
 }
 
 export function applyConversationOpeningWorkflow<T extends Record<string, any>>(agent: T): T {

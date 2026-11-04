@@ -4,8 +4,8 @@ import path from "node:path";
 import { bodyDigest, writableBody, extractPromptSection, verifyReleaseReadback } from "./syncElevenLabsAgent";
 import { conversationControlTools, normalizeControlToolReadback } from "./elevenLabsConversationControlTools";
 import { applyContactToolDescriptions, applyConversationListeningPolicy, applyConversationToolPolicy, applyConversationConsentPolicy } from "../lib/elevenLabsConversationPolicy";
-import { applyConversationOpeningWorkflow, VOICE_STATE_TRANSITION_NODES } from "../lib/elevenLabsOpeningWorkflow";
-import { applyGuardedTerminalWorkflow } from "../lib/elevenLabsTerminalWorkflow";
+import { applyConversationOpeningWorkflow, applyStagedMessageTakerOpeningPrompt, VOICE_STATE_TRANSITION_NODES } from "../lib/elevenLabsOpeningWorkflow";
+import { applyStagedMessageTakerTerminalCondition } from "../lib/elevenLabsTerminalWorkflow";
 import { ELEVENLABS_TTS_CONTROL_BRANCH_ID, ELEVENLABS_TTS_TEST_BRANCH_ID, ELEVENLABS_TTS_CONTROL_MODEL, ELEVENLABS_TTS_TEST_MODEL } from "../lib/elevenLabsRuntimeExperiment";
 
 export function comparisonBody(body: any): any {
@@ -53,6 +53,10 @@ export function buildUniformRelease(owner: any, prompt: string): any {
   return body;
 }
 
+export function buildAutomatedMessageTakerRelease(owner: any): any {
+  return applyStagedMessageTakerTerminalCondition(applyStagedMessageTakerOpeningPrompt(writableBody(owner)));
+}
+
 async function main(): Promise<void> {
   const dir = process.argv.find(a => a.startsWith("--receipt-dir="))?.split("=")[1];
   if (!dir) throw new Error("Private receipt directory required");
@@ -88,7 +92,8 @@ async function main(): Promise<void> {
     || bodyDigest(contact.tool_config) !== bodyDigest(applyContactToolDescriptions(contact.tool_config))) throw new Error("Contact policy mismatch");
   if (bodyDigest(owner.conversation_config.agent.prompt.tool_ids) !== bodyDigest(before[1].conversation_config.agent.prompt.tool_ids)) throw new Error("Tool bindings differ; separate review required");
   const prompt = extractPromptSection(await readFile(path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md"), "utf8"));
-  const shared = applyGuardedTerminalWorkflow(buildUniformRelease(owner, prompt), control);
+  if (owner.conversation_config.agent.prompt.prompt !== prompt) throw new Error("Canonical business prompt drifted");
+  const shared = buildAutomatedMessageTakerRelease(owner);
   const candidates = [ELEVENLABS_TTS_CONTROL_MODEL, ELEVENLABS_TTS_TEST_MODEL].map(model => {
     const body = structuredClone(shared); body.conversation_config.tts.model_id = model; return body;
   });

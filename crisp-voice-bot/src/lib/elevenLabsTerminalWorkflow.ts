@@ -16,6 +16,41 @@ type WorkflowBody = {
 };
 type Options = { resetToolId: string; validateToolId: string; contactToolId: string; mainNodeId: string };
 
+export const PREVIOUS_TERMINAL_ENDING_CONDITION =
+  "A NEW live caller turn contains a genuine goodbye and no unanswered question, correction, revocation or request to wait. Use the ending-permission guard before any closing speech. If a new opt-out, current-call stop, service refusal or other contact outcome needs recording, use the contact-recording path instead; it includes these ending checks. Never repeat a failed or denied ending check for the same caller turn. A callback-only confirmation, email-only preference, thanks, okay, silence or tool result is not a goodbye. Do not use this for voicemail, screening, hold, recorded-message completion or phone handoff.";
+
+export const TERMINAL_ENDING_CONDITION =
+  "A NEW live caller turn contains a genuine goodbye and no unanswered question, correction, revocation or request to wait; OR a high-confidence staged automated receptionist has offered to take a message and callback number, restated the message for confirmation, then confirmed it will pass the message and delivered its first completed farewell. Use the ending-permission guard before one brief Goodbye. If a new opt-out, current-call stop, service refusal or other contact outcome needs recording, use the contact-recording path instead; it includes these ending checks. Never repeat a failed or denied ending check for the same caller turn. A callback-only confirmation, email-only preference, thanks, okay, silence or tool result is not a goodbye. Do not use the automated exception for voicemail, ordinary screening or hold, an incomplete message-taking flow, a live admin asking an unscripted property or service question, or phone handoff. Never continue a goodbye exchange after the first completed receptionist farewell.";
+
+const TERMINAL_DIALOGUE_CONTEXTS = [
+  "main_conversation",
+  "callback_after_unavailable",
+  "patch_transfer",
+  "opening_listener",
+  "short_listing_recovery",
+  "callback_receipt_wait",
+];
+
+export function applyStagedMessageTakerTerminalCondition<T extends WorkflowBody>(body: T): T {
+  const next = structuredClone(body);
+  const edges = next.workflow?.edges;
+  if (!edges) throw new Error("Existing guarded terminal workflow is required");
+  const actual = Object.keys(edges).filter(id => id.startsWith("terminal_guard_from_")).sort();
+  const expected = TERMINAL_DIALOGUE_CONTEXTS.map(id => `terminal_guard_from_${id}`).sort();
+  if (!isDeepStrictEqual(actual, expected)) throw new Error("Exact guarded dialogue contexts are required");
+  for (const context of TERMINAL_DIALOGUE_CONTEXTS) {
+    const edge = edges[`terminal_guard_from_${context}`];
+    const condition = edge?.forward_condition?.condition;
+    if (edge?.source !== context || edge?.target !== TERMINAL_GUARD_NODES.reset || edge.backward_condition !== null
+      || edge.forward_condition?.type !== "llm" || edge.forward_condition?.label !== null
+      || ![PREVIOUS_TERMINAL_ENDING_CONDITION, TERMINAL_ENDING_CONDITION].includes(condition)) {
+      throw new Error(`Guarded terminal entry drifted: ${context}`);
+    }
+    edge.forward_condition.condition = TERMINAL_ENDING_CONDITION;
+  }
+  return next;
+}
+
 function removeModelEndCall(prompt: any): void {
   prompt.built_in_tools ??= {};
   prompt.built_in_tools.end_call = null;
@@ -60,14 +95,7 @@ export function applyGuardedTerminalWorkflow<T extends WorkflowBody>(body: T, op
   if (!nodes[mainNodeId].additional_prompt?.includes(currentTurnInstruction)) {
     nodes[mainNodeId].additional_prompt = [nodes[mainNodeId].additional_prompt, currentTurnInstruction].filter(Boolean).join("\n\n");
   }
-  const dialogueIds = new Set([
-    mainNodeId,
-    "callback_after_unavailable",
-    "patch_transfer",
-    "opening_listener",
-    "short_listing_recovery",
-    "callback_receipt_wait",
-  ]);
+  const dialogueIds = new Set(TERMINAL_DIALOGUE_CONTEXTS.map(id => id === "main_conversation" ? mainNodeId : id));
   const routeOnly = nodes.transfer_result_review;
   if (routeOnly) {
     const outgoing = Object.values(edges).filter((value: any) => value.source === "transfer_result_review");
@@ -85,8 +113,7 @@ export function applyGuardedTerminalWorkflow<T extends WorkflowBody>(body: T, op
   const contexts = modelContexts.filter(([id]) => dialogueIds.has(id));
   const contactCondition = { type: "llm", condition:
     "Record a LIVE caller's new explicit future opt-out, request to stop this call, clear refusal of the service, correction that this is not a short sale, or statement that they will initiate future contact. Use this contact-recording path before any closing speech; it automatically records the actual request and checks whether ending is permitted. Preserve questions, restrictions and earlier genuine interest. Do not record the same caller turn twice, including after a failed or denied ending check. A callback-only or email-only preference, a declined transfer, self-handling alone, a service question or a genuine goodbye without another contact preference does not require this path. Never use it for a recording, screening, hold or background speech." };
-  const endingCondition = { type: "llm", condition:
-    "A NEW live caller turn contains a genuine goodbye and no unanswered question, correction, revocation or request to wait; OR a high-confidence staged automated receptionist has offered to take a message and callback number, restated the message for confirmation, then confirmed it will pass the message and delivered its first completed farewell. Use the ending-permission guard before one brief Goodbye. If a new opt-out, current-call stop, service refusal or other contact outcome needs recording, use the contact-recording path instead; it includes these ending checks. Never repeat a failed or denied ending check for the same caller turn. A callback-only confirmation, email-only preference, thanks, okay, silence or tool result is not a goodbye. Do not use the automated exception for voicemail, ordinary screening or hold, an incomplete message-taking flow, a live admin asking an unscripted property or service question, or phone handoff. Never continue a goodbye exchange after the first completed receptionist farewell." };
+  const endingCondition = { type: "llm", condition: TERMINAL_ENDING_CONDITION };
   const recoveryPrompt = "You are a silent call-recovery router, not the sales assistant. Never produce spoken text, a goodbye, an acknowledgment, a pitch, a tool-failure explanation or a presence check. A still-unanswered live question, correction or changed request belongs in the main conversation, including content in the turn that started the check or arriving during it. The already-processed stop and tool results are not new caller turns. Otherwise wait silently. Silence, noise and placeholder ... require skip_turn, not speech. Do not infer consent, repeat a contact action or end the call.";
   const recoveryNode = (label: string, order: string[], wait = false) => ({
     type: "override_agent", label, position: { x: 1500, y: wait ? 600 : 350 },
