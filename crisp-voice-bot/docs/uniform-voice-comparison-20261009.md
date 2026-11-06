@@ -1,6 +1,28 @@
 # Uniform Conversion Comparison
 
-Current revision is r17, verified at 2026-11-06T01:57:48.117Z (November 5 at 8:57:48 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r17.
+Current revision is r18, verified at 2026-11-06T02:27:58.993Z (November 5 at 9:27:58 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r18.
+
+## Approved Revision 18: Contextual Decline Closeout
+
+Yoni approved treating a listing confirmation paired with a clear decline, such as
+"It is, but I'm good. Thank you," as confirmed target plus terminal service refusal.
+Maya now says only "Understood. Thanks for letting me know." She does not promise to
+take care of anything, re-pitch, or ask for Yoni, callback or transfer. The paired
+prompt-only publisher preserved every non-prompt setting, the r17 no-voicemail workflow,
+native 50/50 allocation, voices, tools, models and turn behavior. No test call was placed.
+
+- Cohort: `maya_uniform_lead_conversion_20261105_r18`.
+- Boundary: `2026-11-06T02:27:58.993Z`.
+- Flash: `agtvrsn_6701m6qay8vje668rjwm2n0zv6rw`.
+- v4: `agtvrsn_1901m6qayb4gemes8s9gsppz4d7w`.
+- Root prompt: `ddcaab684d7f2a4c62621318d0772fd093e49462ad877a39fbe0ac371d10ad58`.
+- Shared normalized body: `f5c5efd3416f238a386f0e775af6580cd88a70252c66bd261eb7383ae017443e`.
+- Workflow: `505039bfc7d39c957e1a8bc99a0415b0b7c527ff4c7f3e93fbf23323acb8637d`.
+
+The provider receipt is in `elevenlabs-r18-prompt-release/` under the approval task.
+Backend transcript classification independently maps the same evidence to
+`answered_not_interested`; terminal IVR operator menus map to `agent_not_available`.
+Configuration readback and synthetic tests are not organic audio proof.
 
 ## Approved Revision 17: Recorded No-Voicemail Instructions
 

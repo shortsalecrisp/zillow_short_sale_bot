@@ -14,10 +14,11 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r17 no-voicemail policy excludes earlier workflow and prompt cohorts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261105_r17");
-  assert.equal(cohort.startedAt, "2026-11-06T01:57:48.117Z");
+test("r18 contextual-decline policy excludes earlier workflow and prompt cohorts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261105_r18");
+  assert.equal(cohort.startedAt, "2026-11-06T02:27:58.993Z");
   for (const versionId of ["agtvrsn_7101m6kejb9xf0xbye478mxq0ddp", "agtvrsn_0201m6kejettftj8rr5mprm8grg8",
+    "agtvrsn_7601m6q96zm5e1astf8q4314k3wt", "agtvrsn_1701m6q972srexdrxgcf1meegsmr",
     "agtvrsn_7101m6gse6zefeqsa481y18yxjr4", "agtvrsn_9101m6gsebm7fzk85t478vmj1kzc",
     "agtvrsn_8401m6fkph5seyfrr5jbkkk6daq0", "agtvrsn_8501m6fkpkemfrp8q394ewj6atks",
     "agtvrsn_7001m64ex5v3fvx8794e269sj033", "agtvrsn_1201m64eyzthfc0r8kdcednrjpw4",

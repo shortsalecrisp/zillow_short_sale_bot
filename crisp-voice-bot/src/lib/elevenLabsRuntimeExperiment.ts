@@ -7,11 +7,11 @@ export const ELEVENLABS_TTS_CONTROL_BRANCH_ID = "agtbrch_1101kpkhs3b4eg5v0q8ppq4
 export const ELEVENLABS_TTS_TEST_BRANCH_ID = "agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv";
 
 export const ELEVENLABS_UNIFORM_COMPARISON = Object.freeze({
-  cohort: "maya_uniform_lead_conversion_20261105_r17",
-  startedAt: "2026-11-06T01:57:48.117Z",
-  controlVersionId: "agtvrsn_7601m6q96zm5e1astf8q4314k3wt",
-  testVersionId: "agtvrsn_1701m6q972srexdrxgcf1meegsmr",
-  sharedConfigSha256: "f424ed3d2e25e241e98ae76b8150b3f0b8cd0e424efba937f903f27305b93f35",
+  cohort: "maya_uniform_lead_conversion_20261105_r18",
+  startedAt: "2026-11-06T02:27:58.993Z",
+  controlVersionId: "agtvrsn_6701m6qay8vje668rjwm2n0zv6rw",
+  testVersionId: "agtvrsn_1901m6qayb4gemes8s9gsppz4d7w",
+  sharedConfigSha256: "f5c5efd3416f238a386f0e775af6580cd88a70252c66bd261eb7383ae017443e",
   workflowSha256: "505039bfc7d39c957e1a8bc99a0415b0b7c527ff4c7f3e93fbf23323acb8637d",
   waitingAudio: { sound: "elevator1", availabilityToolId: "tool_4101m64g0xqteevsgfwtpgxv4he6",
     availabilityToolHash: "6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63" },
