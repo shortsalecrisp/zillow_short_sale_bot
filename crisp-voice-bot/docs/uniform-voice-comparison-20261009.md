@@ -13,6 +13,7 @@ native 50/50 allocation, voices, tools, models and turn behavior. No test call w
 
 - Cohort: `maya_uniform_lead_conversion_20261105_r18`.
 - Boundary: `2026-11-06T02:27:58.993Z`.
+- Policy: `maya-uniform-lead-conversion-20261105-r18`.
 - Flash: `agtvrsn_6701m6qay8vje668rjwm2n0zv6rw`.
 - v4: `agtvrsn_1901m6qayb4gemes8s9gsppz4d7w`.
 - Root prompt: `ddcaab684d7f2a4c62621318d0772fd093e49462ad877a39fbe0ac371d10ad58`.
