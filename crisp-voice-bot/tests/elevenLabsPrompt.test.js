@@ -50,6 +50,9 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /A further caller turn is required before qualification/);
   assert.match(s, /openerVariant continuation is retired; do not speak a second opener/);
   assert.match(s, /A clear yes confirms listing ownership only, not interest in help, a transfer or callback/);
+  assert.match(s, /If they confirm the listing but also say/);
+  assert.match(s, /It is, but I'm good\. Thank you/);
+  assert.match(s, /do not promise to take care of anything/);
   assert.match(s, /Would help with lender paperwork or calls be useful for this listing\?/);
   assert.match(s, /Do not substitute a seller-package status question or an arbitrary qualification question/);
   assert.match(s, /A clear yes to the needs question indicates interest in help, not live-transfer consent/);

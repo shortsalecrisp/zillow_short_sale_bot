@@ -1218,6 +1218,20 @@ function declinedServiceAfterIdentityClarification(conversation: ElevenLabsConve
   });
 }
 
+function confirmedListingWithExplicitServiceDecline(conversation: ElevenLabsConversation): boolean {
+  const messages = conversation.transcript ?? [];
+  const liveMessages = new Set(liveContactMessages(conversation));
+  return messages.some((item, index) => {
+    if ((item.role !== "assistant" && item.role !== "agent") ||
+        !/\bis\b.{0,120}\byour listing\b/i.test(item.message ?? "")) return false;
+    const next = messages.slice(index + 1).find(turn =>
+      turn.role === "user" && typeof turn.message === "string" && hasMeaningfulSpokenContent(turn.message));
+    if (!next?.message || !liveMessages.has(next.message)) return false;
+    const answer = normalizeText(next.message).replace(/[.!?]+/g, " ").replace(/\s+/g, " ").trim();
+    return /^(?:yes|yeah|yep|it is|that is mine|that's mine)[, ]+(?:but|and)[, ]+(?:(?:i'm|i am|we're|we are) (?:good|all set|fine|okay|ok)|no thanks|not interested|(?:i|we) (?:do not|don't|dont) need (?:any )?help)(?:[, ]+(?:thanks|thank you))?$/.test(answer);
+  });
+}
+
 export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsRecordingArtifact(conversation) ||
@@ -1305,6 +1319,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
   });
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    confirmedListingWithExplicitServiceDecline(conversation) ||
     directServiceRefusal ||
     declinedServiceAfterIdentityClarification(conversation) ||
     contextualServiceDecline ||
