@@ -28,6 +28,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows  # unchanged helper
+from active_file_outreach_exception import (
+    approved_active_file_outreach_exception,
+    approved_exception_initial_window_open,
+)
 from listing_address import extract_address_fields, parse_full_address, missing_address_fields
 from bot_min import (
     INITIAL_SMS_END,
@@ -4298,15 +4302,45 @@ def _active_crisp_file_lookup(row: List[str]) -> Dict[str, Any]:
         )
         return {"configured": True, "active_file": False, "unavailable": True}
 
-    return {
+    result = {
         "configured": True,
         "active_file": data.get("activeFile") is True,
         "match": data.get("match") if isinstance(data.get("match"), dict) else {},
     }
+    exception_id = approved_active_file_outreach_exception(row, result)
+    if exception_id:
+        # The match API returns its first match. Independently retain the
+        # subject-property guard so the other-file exception cannot conceal a
+        # newly opened Crisp file for this listing.
+        property_payload = {**payload, "firstName": "", "lastName": "", "phone": "", "email": ""}
+        try:
+            property_response = requests.post(
+                CRISP_SUPPORT_ACTIVE_FILE_URL, json=property_payload,
+                headers={"Authorization": f"Bearer {CRISP_ACTIVE_FILE_LOOKUP_SECRET}"},
+                timeout=CRISP_ACTIVE_FILE_LOOKUP_TIMEOUT_SECONDS,
+            )
+            property_data = property_response.json()
+            if (property_response.status_code != 200 or not isinstance(property_data, dict)
+                    or not isinstance(property_data.get("activeFile"), bool)):
+                raise ValueError("invalid_property_match_result")
+        except Exception as exc:
+            logger.warning("ACTIVE_CRISP_FILE_EXCEPTION_PROPERTY_CHECK_FAILED error=%s", type(exc).__name__)
+            return {"configured": True, "active_file": True, "unavailable": True, "match": result["match"]}
+        if property_data["activeFile"]:
+            return {"configured": True, "active_file": True,
+                    "match": property_data.get("match") or {}}
+        # Retain the real relationship; exempt only its sales suppression for
+        # this exact, owner-approved listing episode.
+        result["owner_exception_id"] = exception_id
+        logger.info(
+            "ACTIVE_CRISP_FILE_OWNER_EXCEPTION_APPLIED exception_id=%s stable_id=%s file_id=%s",
+            exception_id, _row_value(row, 27), result["match"].get("fileId"),
+        )
+    return result
 
 
 def _active_crisp_file_lookup_for_row_obj(row_obj: Dict[str, str]) -> Dict[str, Any]:
-    row = [""] * 7
+    row = [""] * 28
     row[0] = str(row_obj.get("agent_name") or "")
     row[1] = str(row_obj.get("last_name") or "")
     row[2] = str(row_obj.get("phone") or "")
@@ -4314,6 +4348,7 @@ def _active_crisp_file_lookup_for_row_obj(row_obj: Dict[str, str]) -> Dict[str, 
     row[4] = str(row_obj.get("listing_address") or "")
     row[5] = str(row_obj.get("city") or "")
     row[6] = str(row_obj.get("state") or "")
+    row[27] = str(row_obj.get("created-at") or "")
     return _active_crisp_file_lookup(row)
 
 
@@ -4359,7 +4394,16 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     active_file = _active_crisp_file_lookup(row)
     if active_file.get("unavailable"):
         raise HTTPException(status_code=503, detail="active_file_lookup_unavailable")
-    if active_file.get("active_file"):
+    if active_file.get("owner_exception_id"):
+        if force_resend or allow_prior_contact_resend:
+            raise HTTPException(status_code=409, detail="owner_exception_does_not_authorize_resend")
+        if not approved_exception_initial_window_open():
+            raise HTTPException(status_code=409, detail="recipient_outside_local_hours")
+        payload_stable = str(payload.get("stable_id") or payload.get("zpid") or payload.get("listing_id") or "").strip()
+        if ((payload_stable and payload_stable != _row_value(row, 27))
+                or _format_initial_message(payload, row) != _format_initial_message({}, row)):
+            raise HTTPException(status_code=409, detail="owner_exception_payload_identity_mismatch")
+    if active_file.get("active_file") and not active_file.get("owner_exception_id"):
         match = active_file.get("match") or {}
         logger.info(
             "INTERNAL_INITIAL_SMS_ACTIVE_FILE_SUPPRESSED row=%s phone=%s file_id=%s",
@@ -9186,7 +9230,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
                 handoff_type="ACTIVE FILE LOOKUP UNAVAILABLE",
                 reason="Active Crisp file lookup unavailable; automated sales response paused for owner review",
             )
-        elif active_file.get("active_file"):
+        elif active_file.get("active_file") and not active_file.get("owner_exception_id"):
             decision = _sms_decision(
                 lead_status="R",
                 handoff_needed=True,
