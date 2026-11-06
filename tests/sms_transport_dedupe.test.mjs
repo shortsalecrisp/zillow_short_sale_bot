@@ -14,6 +14,8 @@ function harness() {
       appendRow: row => rows.push(row),
       getRange: (start, _column, count) => ({
         getValues: () => rows.slice(start - 1, start - 1 + count),
+        getDisplayValues: () => (sheet.displayRows || rows).slice(start - 1, start - 1 + count)
+          .map(row => row.map(value => String(value || ''))),
         setValue: value => { rows[start - 1][1] = value; },
         setValues: values => { values.forEach((value, offset) => { rows[start - 1 + offset] = value; }); },
       }),
@@ -81,6 +83,22 @@ test('two Tasker paths with different IDs queue one inbound and one owner forwar
   assert.equal(second.queued, false);
   assert.equal(second.duplicate, true);
   assert.equal(h.sheets.get('sms_inbound_queue').rows.length, 2);
+});
+
+test('time-only inbound is claimed from displayed text instead of Date coercion', () => {
+  const h = harness();
+  const sheet = h.sheets.get('sms_inbound_queue');
+  const createdAt = new Date(Date.now() - 30_000);
+  const typed = Array(18).fill('');
+  Object.assign(typed, {0: createdAt, 1: 'queued', 2: 'queue-time', 4: 'message-time', 5: '2025550101',
+    6: new Date('1899-12-30T18:00:00.000Z'), 7: createdAt.toISOString()});
+  const displayed = typed.map(value => String(value || ''));
+  displayed[6] = '1:00 PM';
+  sheet.rows.push(typed);
+  sheet.displayRows = [sheet.rows[0].map(value => String(value || '')), displayed];
+  const claim = h.run('claimQueuedSmsInbound_()');
+  assert.equal(claim.message, '1:00 PM');
+  assert.equal(sheet.rows[1][6], '1:00 PM');
 });
 
 test('same handoff event with changed history is emailed only once', () => {

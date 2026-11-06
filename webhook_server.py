@@ -7185,7 +7185,7 @@ def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text:
 def _sms_service_info_email_acknowledgement(has_email: bool = True, email: str = "") -> str:
     if not has_email or not email:
         return SMS_EMAIL_ADDRESS_REQUEST_REPLY
-    return f"Thanks, I have {email}. I'll review this and send you some information about my services."
+    return f"Thanks, I have {email}. The information email is pending approval."
 
 
 def _sms_has_no_current_short_sale_help(value: Any) -> bool:

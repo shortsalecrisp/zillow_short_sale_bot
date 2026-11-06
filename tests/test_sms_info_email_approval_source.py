@@ -10,7 +10,7 @@ def test_information_request_uses_approval_gated_acknowledgement():
     assert "sendInfoEmailApprovalRequest_(infoEmailData)" in CHATBOT
     assert "INFO_EMAIL_APPROVAL_REQUIRED" in CHATBOT
     assert "An agent requested the short-sale info email. Approval is required before sending." in CHATBOT
-    assert "I'll review this and send you some information about my services" in CHATBOT
+    assert "The information email is pending approval" in CHATBOT
     assert "more information shortly" not in CHATBOT
 
 

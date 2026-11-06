@@ -2478,7 +2478,14 @@ function claimQueuedSmsInbound_() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(3000)) return null;
   try {
-    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_INBOUND_QUEUE_HEADERS_.length).getValues();
+    var inboundRange = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_INBOUND_QUEUE_HEADERS_.length);
+    var rows = inboundRange.getValues();
+    // Google Sheets coerces a time-only inbound such as `1:00 PM` into a
+    // JavaScript Date when getValues() is used. Keep typed timestamps and
+    // leases, but always claim the message column exactly as displayed.
+    var displayRows = typeof inboundRange.getDisplayValues === "function"
+      ? inboundRange.getDisplayValues()
+      : rows.map(function(row) { return row.map(function(value) { return String(value || ""); }); });
     var now = Date.now();
     for (var i = 0; i < rows.length; i++) {
       var status = String(rows[i][1] || "");
@@ -2503,7 +2510,7 @@ function claimQueuedSmsInbound_() {
 
       var selectedIndex = fragmentIndexes[fragmentIndexes.length - 1];
       var combinedMessage = coalesceSmsInboundFragmentTextsV10_(fragmentIndexes.map(function(index) {
-        return rows[index][6];
+        return displayRows[index][6];
       }));
       // Commit the combined message and every source disposition in one Sheet
       // write. Retrying after a transient error can never concatenate an
@@ -2537,6 +2544,7 @@ function claimQueuedSmsInbound_() {
       var leaseToken = Utilities.getUuid();
       var sheetRow = selectedIndex + 2;
       var claimedInboundRow = rows[selectedIndex].slice();
+      claimedInboundRow[6] = combinedMessage;
       claimedInboundRow[1] = "processing";
       claimedInboundRow[8] = attempts;
       claimedInboundRow[9] = leaseToken;
@@ -2550,7 +2558,7 @@ function claimQueuedSmsInbound_() {
         queue_id: String(rows[selectedIndex][2] || ""),
         message_id: String(rows[selectedIndex][4] || ""),
         phone: normalizePhone_(rows[selectedIndex][5]),
-        message: String(rows[selectedIndex][6] || ""),
+        message: combinedMessage,
         received_at: String(rows[selectedIndex][7] || ""),
         attempts: attempts,
         lease_token: leaseToken

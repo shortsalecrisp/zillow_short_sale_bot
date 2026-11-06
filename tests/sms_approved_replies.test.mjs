@@ -264,7 +264,7 @@ test('supported multi-question answer covers location, fee, scope, and tenure', 
 test('email before deciding on call follows approval workflow without call consent', () => {
   const {h, r} = answer('Email me the details at taylor@example.com before I decide whether to schedule a call.');
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /I have taylor@example.com\. I'll review this and send/);
+  assert.equal(r.reply_text, 'Thanks, I have taylor@example.com. The information email is pending approval.');
   assert.match(r.reply_text, /taylor@example.com/);
   assert.doesNotMatch(r.reply_text, /shortly|already sent|Thanks for sending/);
   assert.equal(r.handoff_needed, false);
@@ -279,7 +279,7 @@ test('information email acknowledgement speaks as the sender and preserves appro
   assert.equal(r.should_reply, true);
   assert.equal(r.lead_status, 'O');
   assert.equal(r.reply_text,
-    "Thanks, I have ricardo@capitalrea.net. I'll review this and send you some information about my services.");
+    "Thanks, I have ricardo@capitalrea.net. The information email is pending approval.");
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)),
     [{type: 'email_approval', to: 'ricardo@capitalrea.net'}]);
 });
@@ -418,6 +418,23 @@ test('compact clock parser rejects impossible times and phone-number suffixes', 
   assert.equal(h.evaluate('extractSameDayCallbackReference_("can we talk at 1360pm?")'), '');
   assert.equal(h.evaluate('isSchedulingSignal_("can we talk at 1360pm?")'), false);
   assert.equal(h.evaluate('extractSameDayCallbackReference_("call me at 9109653013")'), '');
+});
+
+test('a time-only post-handoff update preserves owner context without silently changing callback state', () => {
+  const {h, r} = answer('1:00 PM', {
+    human_override: 'TRUE',
+    handoff_flag: 'TRUE',
+    ai_state: 'handoff',
+    call_booking_status: 'scheduled_callback',
+    callback_requested: 'yes',
+    callback_time: '5:00 PM',
+  });
+  assert.equal(r.should_reply, false);
+  assert.equal(r.callback_updated, false);
+  assert.equal(r.handoff_type, 'HUMAN HANDOFF UPDATE');
+  assert.equal(h.state.callback_time, '5:00 PM');
+  assert.equal(h.state.callback_requested, 'yes');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'HUMAN HANDOFF UPDATE'}]);
 });
 
 test('future callback outranks unavailable-right-now language', () => {

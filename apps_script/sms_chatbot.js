@@ -956,6 +956,7 @@ function handleIncomingSmsCore_(body) {
     };
   }
   if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
+    const ambiguousTimeOnly = isAmbiguousTimeOnlyCallbackUpdate_(inboundText);
     const existingCallback = String(currentRowObj[HEADERS.callback_requested] || "").toLowerCase() === "yes" ||
       String(currentRowObj[HEADERS.call_booking_status] || "").toLowerCase() === "scheduled_callback" ||
       isExplicitDayOrDateCallbackSignal_(inboundText);
@@ -967,7 +968,7 @@ function handleIncomingSmsCore_(body) {
     if (changed && (existingCallback || isSubstantivePostHandoffUpdate_(inboundText))) {
       const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
       sendHandoffEmail_({
-        handoff_type: existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE",
+        handoff_type: ambiguousTimeOnly ? "HUMAN HANDOFF UPDATE" : (existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE"),
         agent_name: currentRowObj[HEADERS.agent_name] || "",
         last_name: currentRowObj[HEADERS.last_name] || "",
         initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
@@ -984,14 +985,16 @@ function handleIncomingSmsCore_(body) {
 
     const updateFields = {
       [HEADERS.response_status]: inboundText,
-      [HEADERS.conversation_summary]: existingCallback
+      [HEADERS.conversation_summary]: ambiguousTimeOnly
+        ? "Ambiguous time-only update received after human handoff; callback unchanged"
+        : existingCallback
         ? (changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff")
         : "Scheduling detail received after human handoff",
       [HEADERS.ai_state]: "handoff",
       [HEADERS.handoff_flag]: "TRUE",
       [HEADERS.human_override]: "TRUE"
     };
-    if (existingCallback) {
+    if (existingCallback && !ambiguousTimeOnly) {
       updateFields[HEADERS.call_booking_status] = "scheduled_callback";
       updateFields[HEADERS.callback_requested] = "yes";
       updateFields[HEADERS.callback_time] = callbackTime;
@@ -1006,10 +1009,12 @@ function handleIncomingSmsCore_(body) {
       conversation_done: false,
       handoff_needed: true,
       needs_review: false,
-      callback_updated: existingCallback && changed,
+      callback_updated: existingCallback && changed && !ambiguousTimeOnly,
       alert_needed: changed && (existingCallback || isSubstantivePostHandoffUpdate_(inboundText)),
-      handoff_type: changed ? (existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE") : "",
-      reason: existingCallback
+      handoff_type: changed ? (ambiguousTimeOnly ? "HUMAN HANDOFF UPDATE" : (existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE")) : "",
+      reason: ambiguousTimeOnly
+        ? "Ambiguous time-only update preserved for human review; callback unchanged"
+        : existingCallback
         ? (changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff")
         : "Scheduling detail received after human handoff"
     };
@@ -5782,11 +5787,17 @@ function isCallbackUpdateTiming_(text) {
 function isPostHandoffCallbackUpdate_(rowObj, inboundText) {
   if (String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") return false;
   if (isPropertyLogisticsRequest_(inboundText, rowObj)) return false;
-  if (!isSchedulingSignal_(inboundText) && !isCallbackUpdateTiming_(inboundText)) return false;
+  if (!isAmbiguousTimeOnlyCallbackUpdate_(inboundText) &&
+      !isSchedulingSignal_(inboundText) && !isCallbackUpdateTiming_(inboundText)) return false;
   const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
   const handoffFlag = String(rowObj && rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE";
   const bookingStatus = String(rowObj && rowObj[HEADERS.call_booking_status] || "").toLowerCase();
   return aiState === "handoff" || handoffFlag || bookingStatus === "scheduled_callback" || bookingStatus === "interested_no_call";
+}
+
+function isAmbiguousTimeOnlyCallbackUpdate_(text) {
+  const t = normalizeWhitespace_(String(text || ""));
+  return /^(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{3,4}\s*(?:am|pm))$/i.test(t);
 }
 
 function isExplicitDayOrDateCallbackSignal_(text) {
@@ -6799,7 +6810,7 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
 
   // Approved info-email requests must keep the canonical acknowledgement so
   // the downstream approval workflow can recognize and queue the email.
-  if (/^Thanks, I have (?:your email|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\. I'll review this and send you some information about my services\.$/i.test(text) ||
+  if (/^Thanks, I have (?:your email|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\. The information email is pending approval\.$/i.test(text) ||
       /^Absolutely\. I'll send an overview of what I handle and how the fee works to [^\s@]+@[^\s@]+\.[^\s@]+\.$/.test(text)) {
     return text;
   }
@@ -7189,7 +7200,7 @@ function shouldSendInfoEmail_(ruleResult, decision) {
 
 function getInfoEmailAcknowledgementReply_(email) {
   const destination = isValidEmailAddress_(email) ? email : "your email";
-  return "Thanks, I have " + destination + ". I'll review this and send you some information about my services.";
+  return "Thanks, I have " + destination + ". The information email is pending approval.";
 }
 
 function isInfoEmailApprovalRequired_() {
