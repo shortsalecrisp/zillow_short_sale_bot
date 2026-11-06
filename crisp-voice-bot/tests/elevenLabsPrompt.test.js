@@ -327,4 +327,7 @@ test("voicemail keeps attempt limits, live-admin distinction and safe mismatch h
   assert.match(s, /For a matching voicemail greeting, use voicemail_detection after the greeting finishes/);
   assert.match(s, /empty voicemailMessage so this path ends without a second message/);
   assert.match(s, /Screening\/hold that is still trying to reach a person is not voicemail and is not an exit reason/);
+  assert.match(s, /completed recorded[^\n]+silent no-message exit, not voicemail_detection/);
+  assert.match(s, /infer no live opt-out, callback or SMS consent/);
+  assert.match(s, /Later live speech supersedes recordings/);
 });

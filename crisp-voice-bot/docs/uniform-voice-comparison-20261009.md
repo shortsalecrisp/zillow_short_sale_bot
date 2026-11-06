@@ -1,6 +1,43 @@
 # Uniform Conversion Comparison
 
-Current revision is r16, verified at 2026-11-04T14:14:26.071Z (November 4 at 9:14:26 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r16.
+Current revision is r17, verified at 2026-11-06T01:57:48.117Z (November 5 at 8:57:48 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r17.
+
+## Approved Revision 17: Recorded No-Voicemail Instructions
+
+Yoni approved fixing Jana row 6609's recorded no-voicemail handling without calling her again,
+and separately approved the monitor pin update. A completed, clearly prerecorded greeting
+explicitly prohibiting voicemail or requesting text INSTEAD OF voicemail routes silently to
+the dedicated recording-only end node before speech or voicemail_detection. A faster-text
+suggestion alongside an invitation to leave a message is not a prohibition. No recording creates
+live opt-out, callback, information, SMS consent or handoff authority. A later actual live
+interruption, question, consent, opt-out or takeover retains the existing live guarded paths.
+
+The paired publisher changed exactly seven reviewed surfaces: root business policy, its embedded
+opening prefix, one dedicated end node, two recording-only edges, and the corresponding two edge
+orders. Existing contact/ending guards stay first, every other edge/order/tool/audio/voice/model
+setting is protected, and both arms retain native 50/50. The unchanged voicemail message and all
+non-voicemail business sections are protected. The root prompt is 6,299 words, still strictly
+below the unchanged 6,300-word guard. No lead, paid test or synthetic phone call was placed.
+
+- Cohort: `maya_uniform_lead_conversion_20261105_r17`.
+- Boundary after final two-arm readback: `2026-11-06T01:57:48.117Z`.
+- Policy: `maya-uniform-lead-conversion-20261105-r17`.
+- Flash: `agtvrsn_7601m6q96zm5e1astf8q4314k3wt`.
+- v4: `agtvrsn_1701m6q972srexdrxgcf1meegsmr`.
+- Root prompt: `6bddb3c43b64d8763a0d37402b5ed455171ddbe5985343e41688d0efa7bca530`.
+- Shared normalized body: `f424ed3d2e25e241e98ae76b8150b3f0b8cd0e424efba937f903f27305b93f35`.
+- Workflow: `505039bfc7d39c957e1a8bc99a0415b0b7c527ff4c7f3e93fbf23323acb8637d`.
+
+The shared backend recognizes this recording without crediting human contact or fabricating
+delivery. Later live callbacks/opt-outs still supersede it; any voicemail actually delivered
+remains delivery history even when it violated the preference. Jana's existing K=N, both real
+attempts and cleared cadence are retained without a Sheet write or redial. R16's verified
+66 genuine calls (Flash29/v4 37) remain a separate historical checkpoint, not true-live counts.
+The inherited narrow validator-only response-default recipes remain unchanged.
+
+Exact plan, seven-surface diff and final paired receipt are in
+`voice-no-voicemail-repair-20261105/paired-release/` under the original voice task's artifact root.
+Configuration/readback and synthetic tests are not organic no-message or acoustic proof.
 
 ## Approved Validator-Only Response Defaults, November 5
 

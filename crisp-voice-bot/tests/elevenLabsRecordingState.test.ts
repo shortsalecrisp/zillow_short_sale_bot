@@ -1,8 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isAutomatedMessageTakerConversation, isRecordingOrScreeningArtifact, isRepeatedPhoneMenuFragment } from "../src/lib/elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact, isRepeatedPhoneMenuFragment } from "../src/lib/elevenLabsRecordingState";
 
 const menu = "Thank you for calling Synthetic Realty. For buying or selling, press one. For property management, press two.";
+const noMessage = "Hola. Thank you for calling Jana. I am so sorry I'm not able to take your call, but please send me a text. Please do not leave me a voicemail as I hardly ever listen to those. Have a great day.";
+
+test("an explicit recorded no-message instruction is not live contact intent", () => {
+  assert.equal(isRecordedNoVoicemailGreeting(noMessage), true);
+  assert.equal(isRecordingOrScreeningArtifact([{ role: "user", message: noMessage }]), true);
+  for (const text of [
+    "You've reached Jana. I cannot answer your call. Don't leave a message; text me instead.",
+    "This is Jana. I can't take your call. Please text me instead of voicemail.",
+  ]) assert.equal(isRecordedNoVoicemailGreeting(text), true);
+  for (const text of [
+    "Hi, this is Jana. Please leave a message, or text me for a faster response.",
+    "Please don't leave a voicemail. Can you email me instead?",
+    "My voicemail says don't leave a message. I'm here now. What is this about?",
+    "Thanks, Maya. Please stay on the line.",
+    "This is Jana. I cannot take your call. Do you want me to call you back?",
+  ]) assert.equal(isRecordedNoVoicemailGreeting(text), false);
+});
+
+test("later actual callback, opt-out and admin questions supersede a no-message recording", () => {
+  for (const text of ["This is Jana. Can you call me back tomorrow?", "Please stop calling me.",
+    "I'm the assistant. Which property are you calling about?", "Please email me instead."]) {
+    assert.equal(isRecordingOrScreeningArtifact([{ role: "user", message: noMessage }, { role: "user", message: text }]), false);
+  }
+});
 
 test("repeated IVR greeting fragments do not invent a later live pickup", () => {
   for (const fragment of ["Thank you for calling. Good", "Thank you for calling.", "Thank you for calling Synthetic Realty."]) {

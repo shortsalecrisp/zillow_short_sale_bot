@@ -1,5 +1,5 @@
 import type { CallMetadata } from "../types";
-import { isAutomatedMessageTakerConversation, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
 import {
   hasCallbackOrLaterSignal,
   hasClearLiveTransferConsent,
@@ -124,6 +124,7 @@ type AutomatedContact = "voicemail" | "screening" | "ivr";
 
 function automatedContactType(message: string): AutomatedContact | null {
   const text = normalizeText(message);
+  if (isRecordedNoVoicemailGreeting(message)) return "voicemail";
   if (/\b(?:call assist|google (?:call )?screening|automated (?:call )?screener)\b/.test(text)) return "screening";
   if (/\b(?:press|dial) (?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/.test(text) ||
       /\bif you know (?:your )?party'?s extension\b/.test(text)) return "ivr";
@@ -618,6 +619,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       interpretation: "A user transcript with zero assistant turns is a diagnostic signal, not proof of the failure lane. Compare response audio, tool lifecycle, request identity, final status and playback before classifying provider, transcript or bot failure.",
     },
     rawSignals: {
+      recordedNoVoicemailGreeting: rawUserMessages.some(isRecordedNoVoicemailGreeting),
       // This preserves the old liveAnswered heuristic, not a provider human verdict.
       hasMeaningfulUserTranscript: Array.isArray(input.conversation.transcript) ? rawUserMessages.length > 0 : null,
       userTurns: Array.isArray(input.conversation.transcript) ? rawUserMessages.length : null,

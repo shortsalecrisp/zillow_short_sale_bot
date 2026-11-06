@@ -15,7 +15,7 @@ import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContex
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "./elevenLabsDoNotCall";
-import { isAutomatedMessageTakerConversation, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
@@ -952,6 +952,7 @@ function liveContactMessages(conversation: ElevenLabsConversation): string[] {
 
   return userMessages(conversation).filter((message) =>
     hasMeaningfulSpokenContent(message) &&
+    !isRecordedNoVoicemailGreeting(message) &&
     !/^\s*\[?(?:inaudible|unintelligible|silence|noise)\]?\s*$/i.test(message) &&
     !/\b(?:please leave (?:me |us )?(?:a |your )?message|after the (?:tone|beep)|at the beep|your call has been forwarded|mailbox is full)\b/i.test(message),
   );
@@ -1325,6 +1326,11 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
 }
 
 export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
+  if (userMessages(conversation).some(isRecordedNoVoicemailGreeting)) {
+    // A later genuine human supersedes the recording, but never erase an actual delivered message.
+    if (!isRecordingOrScreeningArtifact(conversation.transcript ?? []) && !usedVoicemailDetectionTool(conversation)) return false;
+    return true;
+  }
   if (usedVoicemailDetectionTool(conversation)) {
     return true;
   }

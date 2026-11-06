@@ -34,10 +34,23 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
+export function isRecordedNoVoicemailGreeting(message: string): boolean {
+  const text = normalizeText(message);
+  const refusal = /\b(?:do not|don't|dont|never) leave (?:me |us )?(?:a |any )?(?:voice ?mail(?: message)?s?|messages?)\b/.test(text) ||
+    /\b(?:text me|send me (?:a )?text(?: message)?)\b.{0,60}\b(?:instead of|rather than)\b.{0,30}\b(?:voice ?mail|leaving (?:a )?message)\b/.test(text);
+  const greeting = /^(?:(?:hi|hello|hola|good (?:morning|afternoon|evening))[.!?, ]+)?(?:thank you for calling|thanks for calling|you(?:'ve| have) reached|this is)\b/.test(text) ||
+    /\byour call has been forwarded\b/.test(text);
+  const unavailable = /\b(?:not (?:able|available)|unable|can't|cannot)\b.{0,45}\b(?:take|answer|call|phone)\b/.test(text) ||
+    /\bsorry i missed your call\b/.test(text);
+  const liveOrQuoted = /\b(?:my (?:greeting|recording|voicemail) (?:says|said)|i(?:'m| am) (?:here|on the line)|what(?:'s| is) this about|who is this|how (?:can|may) i help|can you hear me)\b/.test(text) || text.includes("?");
+  return refusal && greeting && unavailable && !liveOrQuoted;
+}
+
 function isAutomatedMessage(message: string): boolean {
   const text = normalizeText(message);
 
   return (
+    isRecordedNoVoicemailGreeting(message) ||
     /\b(?:automated (?:system|attendant)|recording|pre-?recorded|call screening|screening service|phone tree|ivr|virtual assistant)\b/.test(
       text,
     ) ||

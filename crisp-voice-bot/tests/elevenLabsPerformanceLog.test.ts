@@ -9,6 +9,22 @@ process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 
+test("no-voicemail recording is automated evidence, while a later live agent still supersedes it", async () => {
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+  const greeting = "Thank you for calling Jana. I'm not able to take your call. Please do not leave me a voicemail; send me a text. Have a great day.";
+  const base = { conversationId: "conv_no_message", metadata: { rowNumber: 123, fullName: "Jana Synthetic", callAttemptNumber: 1 },
+    outcome: "Voicemail reached without a message", summary: "", transcript: "", terminalCallResult: "voicemail_reached" };
+  const parse = (transcript: Array<{ role: string; message: string }>, terminalCallResult = "voicemail_reached") => JSON.parse(buildVoicePerformanceLog({ ...base, terminalCallResult,
+    conversation: { conversation_id: base.conversationId, status: "done", transcript } }).split("\n").slice(1).join("\n"));
+  const recorded = parse([{ role: "user", message: greeting }]);
+  assert.equal(recorded.rawSignals.recordedNoVoicemailGreeting, true);
+  assert.equal(recorded.contactEvidence.humanAnswered, false);
+  assert.equal(recorded.contactEvidence.reviewBucket, "voicemail");
+  assert.equal(recorded.flags.callbackRequested, false);
+  const live = parse([{ role: "user", message: greeting }, { role: "user", message: "This is Jana, the listing agent. What is this about?" }], "call_received_agent_hung_up");
+  assert.equal(live.contactEvidence.targetAgentAnswered, true);
+});
+
 test("voice performance log stores codex-readable cohort metrics in one cell block", async () => {
   const { buildVoicePerformanceLog, VOICE_PERFORMANCE_LOG_MARKER } = await import(
     "../src/lib/elevenLabsPerformanceLog"

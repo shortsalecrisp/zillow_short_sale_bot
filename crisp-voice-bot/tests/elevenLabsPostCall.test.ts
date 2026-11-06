@@ -21,6 +21,26 @@ process.env.SMTP_PASS = "";
 process.env.ALERT_EMAIL_TO = "";
 
 const originalAdapter = axios.defaults.adapter;
+
+test("recorded no-voicemail greeting silently reaches voicemail without inventing delivery or contact consent", async () => {
+  const api = await import("../src/lib/elevenLabsPostCall");
+  const greeting = "Hola. Thank you for calling Jana. I am so sorry I'm not able to take your call. Please do not leave me a voicemail; please send me a text and I'll get back to you. Have a great day.";
+  const c = { status: "done", has_user_audio: true, transcript: [{ role: "user", message: greeting }] };
+  assert.equal(api.shouldTreatAsVoicemail(c), true);
+  assert.equal(api.getAuthoritativeTerminalCallResult(c, 1, { firstName: "Jana" }), "voicemail_reached");
+  assert.equal(api.getVoicemailOrNoAnswerCallResult(c, 2), "voicemail_reached_final_attempt");
+  assert.equal(api.shouldTreatAsDoNotCall(c), false);
+  assert.equal(api.getExplicitCallbackConsent(c), undefined);
+  assert.equal(api.getVoiceContactRequestResult(c), undefined);
+  const later = { ...c, transcript: [...c.transcript, { role: "user", message: "This is Jana. Please call me back tomorrow at 10." }] };
+  assert.equal(api.shouldTreatAsVoicemail(later), false);
+  assert.ok(api.getExplicitCallbackConsent(later));
+  const optout = { ...c, transcript: [...c.transcript, { role: "user", message: "Please do not call me again." }] };
+  assert.equal(api.shouldTreatAsDoNotCall(optout), true);
+  assert.equal(api.getVoiceContactRequestResult(optout), "do_not_call");
+  const actuallyDelivered = { ...c, transcript: [...c.transcript, { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. Call back at 404-300-9526." }] };
+  assert.equal(api.getVoicemailOrNoAnswerCallResult(actuallyDelivered, 1), "voicemail_left");
+});
 const measurementConversations = new Map<string, Record<string, unknown>>();
 const measurementWrites: Array<Record<string, unknown>> = [];
 const requestQueueRefill = async () => { measurementWrites.push({ action: "backend_queue_refill" }); };
