@@ -2,6 +2,35 @@
 
 Current revision is r16, verified at 2026-11-04T14:14:26.071Z (November 4 at 9:14:26 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r16.
 
+## Approved Validator-Only Response Defaults, November 5
+
+Both exact r16 GET responses gained `conversation_config.avatar: null` and the disabled
+override-permission flag
+`platform_settings.overrides.conversation_config_override.agent.prompt.reasoning_effort: false`.
+Yoni approved reconciling only these exact response shapes and reverifying the 36 held calls.
+Offline removal alone reproduced the original shared and protected-platform hashes on both arms.
+This does not authorize changing any provider setting, actual LLM reasoning effort, or cohort.
+
+The shared-body normalizer removes only an OWN `avatar` strictly equal to null from the
+non-array root conversation_config object. Missing stays missing; configured avatars of any
+other type, nested avatar fields and all other fields remain visible to the pinned digest.
+The protected-platform normalizer deep-clones its input and traverses only OWN, non-array
+object containers at overrides/conversation_config_override/agent/prompt. It removes only
+an OWN reasoning_effort strictly equal to boolean false at that exact permission path.
+Absent stays absent; true, null, numeric/string values, configured objects/arrays, malformed
+containers, unrelated permissions and actual conversation_config.agent.prompt.reasoning_effort
+are preserved. Every other protected platform/phone/WhatsApp/procedure field stays checked.
+
+The executable verifier still performs exactly three GETs, with the shared-audio check one
+separate GET. Input responses are not mutated. The unchanged r16 exact versions, root prompt,
+shared/workflow hashes, native 50/50 split and original November 4 boundary remain authoritative.
+No publisher, provider write, call, schedule/notification change or sample reset accompanies
+this reconciliation. Earlier cohorts are never pooled. Receipt-level current-phone/attempt
+verification remains required before admitting held calls; this is not a TTS winner review.
+
+Evidence: `voice-r16-validator-reconciliation-20261105/` under the original voice task's
+artifact root, alongside `voice-r16-review-20261105-evening/drift-diagnosis.json`.
+
 ## Approved Revision 16: Automated Message-Taker Closeout
 
 Yoni approved the narrow Harrison-class fix for staged automated receptionists that offer to

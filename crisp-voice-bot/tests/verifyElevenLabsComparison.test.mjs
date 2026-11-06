@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as validator from '../src/scripts/verifyElevenLabsComparison.mjs';
 import { comparisonBody, comparisonWorkflow, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R8_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
 function fixture(index = 0) {
@@ -20,6 +21,60 @@ function newShape(agent) {
 }
 const expected = { ...R8_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
 const allocation = () => ({ meta: { total: 2 }, results: R8_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
+
+test('only an own null root conversation avatar is a neutral GET default', () => {
+  const fresh = fixture(); fresh.conversation_config.avatar = null;
+  const before = JSON.stringify(fresh);
+  assert.deepEqual(comparisonBody(fresh), comparisonBody(fixture()));
+  assert.equal(JSON.stringify(fresh), before);
+  assert.equal(validateComparison([fresh, fixture(1)], allocation(), expected).ok, true);
+  for (const value of [false, true, 0, '', 'null', [], {}, { image_url: 'configured' }]) {
+    const changed = fixture(); changed.conversation_config.avatar = value;
+    assert.throws(() => validateComparison([changed, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+  for (const change of [
+    a => { a.conversation_config.agent.avatar = null; },
+    a => { a.conversation_config.other_default = null; },
+    a => { a.workflow.avatar = null; },
+  ]) {
+    const changed = fixture(); change(changed);
+    assert.throws(() => validateComparison([changed, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+});
+
+test('only the exact own false platform reasoning-effort override permission is reconciled', () => {
+  const base = { test: false, overrides: { conversation_config_override: { agent: { prompt: {} } } } };
+  const agents = [fixture(), fixture(1)]; agents.forEach(a => { a.platform_settings = structuredClone(base); });
+  agents[0].platform_settings.overrides.conversation_config_override.agent.prompt.reasoning_effort = false;
+  const before = JSON.stringify(agents);
+  assert.equal(validateComparison(agents, allocation(), expected).ok, true);
+  assert.deepEqual(validator.comparisonPlatformSettings(agents[0].platform_settings), base);
+  assert.equal(JSON.stringify(agents), before);
+  for (const value of [true, null, 0, 'false', '', [], {}, { configured: false }]) {
+    const changed = structuredClone(agents);
+    changed[0].platform_settings.overrides.conversation_config_override.agent.prompt.reasoning_effort = value;
+    assert.throws(() => validateComparison(changed, allocation(), expected), /protected arm mismatch/);
+  }
+  for (const change of [
+    p => { p.overrides.conversation_config_override.agent.prompt.other_permission = false; },
+    p => { p.reasoning_effort = false; },
+    p => { p.overrides.conversation_config_override.agent.reasoning_effort = false; },
+    p => { p.overrides.conversation_config_override.agent.prompt = null; },
+    p => { p.overrides.conversation_config_override.agent.prompt = []; },
+    p => { delete p.overrides.conversation_config_override.agent.prompt; },
+    p => { p.overrides.conversation_config_override.agent = []; },
+    p => { p.overrides.conversation_config_override = null; },
+    p => { p.overrides = []; },
+  ]) {
+    const changed = structuredClone(agents); change(changed[0].platform_settings);
+    assert.throws(() => validateComparison(changed, allocation(), expected), /protected arm mismatch/);
+  }
+  for (const value of [undefined, null, [], false, 0, 'false', { overrides: null }]) {
+    assert.deepEqual(validator.comparisonPlatformSettings(value), value);
+  }
+  const actualReasoning = fixture(); actualReasoning.conversation_config.agent.prompt.reasoning_effort = false;
+  assert.throws(() => validateComparison([actualReasoning, fixture(1)], allocation(), expected), /configuration digest/);
+});
 
 test('only own empty reroutes arrays on direct workflow edge objects are reconciled', () => {
   const agents = [fixture(), fixture(1)];
@@ -221,6 +276,10 @@ test('live verifier makes exactly three GETs and never invokes a publisher or ot
     assert.equal(options.method, 'GET'); requests.push(url);
     const value = url.endsWith('/branches') ? allocation()
       : disabledNoiseShape(fixture(url.includes(R8_COMPARISON.arms[1].branchId) ? 1 : 0));
+    if (!url.endsWith('/branches')) {
+      value.conversation_config.avatar = null;
+      value.platform_settings.overrides = { conversation_config_override: { agent: { prompt: { reasoning_effort: false } } } };
+    }
     return { ok: true, json: async () => value };
   };
   const result = await verifyLiveComparison({ apiKey: 'synthetic_key', expected }, fetcher);

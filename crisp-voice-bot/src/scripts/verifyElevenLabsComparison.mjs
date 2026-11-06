@@ -22,6 +22,22 @@ export const canonical = value => Array.isArray(value) ? value.map(canonical)
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up some noise in the background. Could you move somewhere quieter?";
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+export function comparisonPlatformSettings(settings) {
+  const result = structuredClone(settings);
+  const path = ['overrides', 'conversation_config_override', 'agent', 'prompt'];
+  let prompt = result;
+  for (const key of path) {
+    if (!isObject(prompt) || !Object.hasOwn(prompt, key)) return result;
+    prompt = prompt[key];
+  }
+  // Disabled override permission only; this is not the agent's actual LLM reasoning setting.
+  if (isObject(prompt) && Object.hasOwn(prompt, 'reasoning_effort') && prompt.reasoning_effort === false) {
+    delete prompt.reasoning_effort;
+  }
+  return result;
+}
 
 export function comparisonWorkflow(workflow) {
   const result = structuredClone(workflow);
@@ -41,6 +57,10 @@ export function comparisonWorkflow(workflow) {
 export function comparisonBody(agent) {
   const body = structuredClone({ conversation_config: agent.conversation_config, workflow: agent.workflow });
   body.workflow = comparisonWorkflow(body.workflow);
+  if (isObject(body.conversation_config) && Object.hasOwn(body.conversation_config, 'avatar')
+      && body.conversation_config.avatar === null) {
+    delete body.conversation_config.avatar;
+  }
   const asr = body.conversation_config.asr;
   if (asr && typeof asr === 'object' && !Array.isArray(asr)
       && Object.hasOwn(asr, 'keyterm_libraries') && Array.isArray(asr.keyterm_libraries)
@@ -103,7 +123,9 @@ export function validateComparison(agents, allocation, expected = R8_COMPARISON)
   });
   assert.deepEqual(canonical(bodies[0]), canonical(bodies[1]), 'Normalized bodies must be directly identical');
   for (const key of ['platform_settings', 'phone_numbers', 'whatsapp_accounts', 'procedures']) {
-    assert.equal(digest(agents[0][key] ?? null), digest(agents[1][key] ?? null), `${key}: protected arm mismatch`);
+    const normalized = agents.map(agent => key === 'platform_settings'
+      ? comparisonPlatformSettings(agent[key] ?? null) : agent[key] ?? null);
+    assert.equal(digest(normalized[0]), digest(normalized[1]), `${key}: protected arm mismatch`);
   }
   return { ok: true, readOnly: true, cohort: expected.cohort, startedAt: expected.startedAt,
     sharedHash: expected.sharedHash, workflowHash: expected.workflowHash, arms };
