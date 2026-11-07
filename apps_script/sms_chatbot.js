@@ -6593,6 +6593,7 @@ function isIdentityResendSignal_(text) {
     .trim();
 
   const patterns = [
+    /^(?:apologies[, ]+)?(?:i (?:do not|don't|dont) have (?:a|the|your) message from earlier[.!? ]+)?who (?:is|are) (?:this|you)[,? ]+(?:and )?what is this (?:regarding|about)$/,
     /^(?:i'?m\s+)?sorry[, ]*(?:but\s+)?who is this$/,
     /^who is this$/,
     /^who'?s this$/,
@@ -6764,6 +6765,7 @@ function sanitizeReplyPropertyReference_(replyText, rowObj) {
   text = text.replace(new RegExp("\\b" + escapedAddress + "\\b", "gi"), "your listing");
 
   return text
+    .replace(/\byour listing\s+at\s+your listing\b/gi, "your listing")
     .replace(/\byour listing\s+or\s+your listing\b/gi, "your listing")
     .replace(/\s+/g, " ")
     .trim();
