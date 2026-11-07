@@ -1362,6 +1362,11 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     return true;
   }
 
+  // Earlier menu instructions mentioning voicemail cannot erase the live
+  // office listener who joined afterward. Strong terminal mailbox evidence
+  // above retains its precedence.
+  if (hasLiveHumanGatekeeperEvidence(conversation)) return false;
+
   // An assistant's offer to leave a message is not evidence of a mailbox.
   const callerWords = userMessages(conversation).filter(hasMeaningfulSpokenContent);
   const text = normalizeText(callerWords.length ? callerWords.join(" ") : conversation.analysis?.transcript_summary ?? "");
@@ -1862,9 +1867,20 @@ export function hasLiveHumanGatekeeperEvidence(
     );
   });
 
-  if (contextualUserTurns.length === 0) {
-    return differentNamedPickup;
-  }
+  // An office pickup may be the first human turn after a phone menu; it
+  // need not follow an assistant turn to establish the new live listener.
+  const namedOfficePickup = transcript.some((item, index) => {
+    if (index <= lastScreeningIndex || item.role !== "user" || typeof item.message !== "string") return false;
+    const text = normalizeText(item.message);
+    const pickup = text.match(/^(?:thank you for calling|welcome to)\s+(.{2,80}?)[.!?]\s*this is\s+([a-z][a-z'-]*)[.!?, ]+\s*how (?:can|may) i help (?:you|ya)[?.! ]*$/);
+    if (!pickup || /\b(?:voicemail|leave (?:a |your )?message|recorded|automated)\b/.test(text)) return false;
+    if (expected && nameSoundsSimilar(pickup[2], expected)) return false;
+    return transcript.slice(index + 1).some(next =>
+      (next.role === "assistant" || next.role === "agent") &&
+      typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
+  });
+  if (namedOfficePickup) return true;
+  if (contextualUserTurns.length === 0) return differentNamedPickup;
 
   const contextualText = normalizeText(contextualUserTurns.map((item) => item.message ?? "").join(" "));
   const liveOfficeInteraction =

@@ -22,6 +22,19 @@ process.env.ALERT_EMAIL_TO = "";
 
 const originalAdapter = axios.defaults.adapter;
 
+test('Compass first live office pickup after IVR outranks identity-mismatch voicemail', async () => {
+  const api = await import('../src/lib/elevenLabsPostCall');
+  const c = {status:'done', has_user_audio:true, transcript:[
+    {role:'user',message:'Thank you for calling Compass. Press one to speak to our front desk, press two for a dial-by-name directory, and press zero to leave a voicemail.'},
+    {role:'user',message:'Thank you for calling Compass. This is Allie. How can I help you?'},
+    {role:'agent',message:"Hi, this is Maya with Crisp Short Sales. We help with short-sale lender paperwork. I'm calling about..."},
+  ]};
+  assert.equal(api.shouldTreatAsIdentityMismatchVoicemail(c,'Emily'),false);
+  assert.equal(api.getAuthoritativeTerminalCallResult(c,1,{firstName:'Emily'}),'gatekeeper_admin_early_exit');
+  const recording = {...c,transcript:[c.transcript[0],{role:'user',message:'This is Allie. Please leave a message after the tone.'}]};
+  assert.equal(api.getAuthoritativeTerminalCallResult(recording,1,{firstName:'Emily'}),'identity_mismatch_voicemail');
+});
+
 test("recorded no-voicemail greeting silently reaches voicemail without inventing delivery or contact consent", async () => {
   const api = await import("../src/lib/elevenLabsPostCall");
   const greeting = "Hola. Thank you for calling Jana. I am so sorry I'm not able to take your call. Please do not leave me a voicemail; please send me a text and I'll get back to you. Have a great day.";
