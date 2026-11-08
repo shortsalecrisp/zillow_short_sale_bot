@@ -264,7 +264,7 @@ test('supported multi-question answer covers location, fee, scope, and tenure', 
 test('email before deciding on call follows approval workflow without call consent', () => {
   const {h, r} = answer('Email me the details at taylor@example.com before I decide whether to schedule a call.');
   assert.equal(r.should_reply, true);
-  assert.equal(r.reply_text, 'Thanks, I have taylor@example.com. The information email is pending approval.');
+  assert.equal(r.reply_text, "Yes, I'll send it to taylor@example.com now.");
   assert.match(r.reply_text, /taylor@example.com/);
   assert.doesNotMatch(r.reply_text, /shortly|already sent|Thanks for sending/);
   assert.equal(r.handoff_needed, false);
@@ -279,7 +279,7 @@ test('information email acknowledgement speaks as the sender and preserves appro
   assert.equal(r.should_reply, true);
   assert.equal(r.lead_status, 'O');
   assert.equal(r.reply_text,
-    "Thanks, I have ricardo@capitalrea.net. The information email is pending approval.");
+    "Yes, I'll send it to ricardo@capitalrea.net now.");
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)),
     [{type: 'email_approval', to: 'ricardo@capitalrea.net'}]);
 });

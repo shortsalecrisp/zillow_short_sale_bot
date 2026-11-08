@@ -1640,17 +1640,6 @@ function handleIncomingSmsCore_(body) {
       authorizeNewHandoffReply_(phoneRaw, body.message_id, decision.reply_text);
     }
 
-    updateRowFields_(sheet, row, updates);
-
-    if (decision.lead_status === "O" && ruleResult.info_email_to) {
-      syncWarmInfoOpportunityRows_(
-        sheet,
-        ruleResult.info_email_to,
-        currentRowObj,
-        inboundText
-      );
-    }
-
     if (shouldSendInfoEmail_(ruleResult, decision)) {
       const infoEmailData = {
         to: ruleResult.info_email_to,
@@ -1662,14 +1651,17 @@ function handleIncomingSmsCore_(body) {
         state: currentRowObj[HEADERS.state] || "",
         zip: currentRowObj[HEADERS.zip] || "",
         phone: phoneRaw,
-        last_message: inboundText
+        last_message: inboundText,
+        request_id: String(body.message_id || body.request_id || "")
       };
 
-      if (isInfoEmailApprovalRequired_()) {
-        sendInfoEmailApprovalRequest_(infoEmailData);
-      } else {
-        sendAgentInfoEmail_(infoEmailData);
-      }
+      sendInfoEmailApprovalRequest_(infoEmailData);
+    }
+
+    updateRowFields_(sheet, row, updates);
+
+    if (decision.lead_status === "O" && ruleResult.info_email_to) {
+      syncWarmInfoOpportunityRows_(sheet, ruleResult.info_email_to, currentRowObj, inboundText);
     }
 
     return {
@@ -2670,7 +2662,7 @@ function buildInfoRequestDecisionV4_(text, rowObj) {
     lead_status: warm ? "O" : "Y", conversation_done: warm && !!targetEmail,
     handoff_needed: false, needs_review: false, block_reply: false,
     send_info_email: !!targetEmail, info_email_to: targetEmail,
-    reason: targetEmail ? "Agent requested information; owner approval queued before SMS acknowledgement" : "Agent requested information; collecting email address"};
+    reason: targetEmail ? "Agent requested information; email sent before SMS acknowledgement" : "Agent requested information; collecting email address"};
 }
 
 function buildTerminalCoverageDecisionV4_(text, rowObj) {
@@ -6810,9 +6802,9 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
     return text;
   }
 
-  // Approved info-email requests must keep the canonical acknowledgement so
-  // the downstream approval workflow can recognize and queue the email.
-  if (/^Thanks, I have (?:your email|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\. The information email is pending approval\.$/i.test(text) ||
+  // Preserve the canonical acknowledgement; delivery runs before returning it.
+  if (text === getInfoEmailAcknowledgementReply_() ||
+      /^Yes, I'll send it to [^\s@]+@[^\s@]+\.[^\s@]+ now\.$/.test(text) ||
       /^Absolutely\. I'll send an overview of what I handle and how the fee works to [^\s@]+@[^\s@]+\.[^\s@]+\.$/.test(text)) {
     return text;
   }
@@ -7202,20 +7194,63 @@ function shouldSendInfoEmail_(ruleResult, decision) {
 
 function getInfoEmailAcknowledgementReply_(email) {
   const destination = isValidEmailAddress_(email) ? email : "your email";
-  return "Thanks, I have " + destination + ". The information email is pending approval.";
+  return "Yes, I'll send it to " + destination + " now.";
 }
 
 function isInfoEmailApprovalRequired_() {
-  const props = PropertiesService.getScriptProperties();
-  const raw = props.getProperty("INFO_EMAIL_APPROVAL_REQUIRED");
-  if (raw === null || raw === undefined || String(raw).trim() === "") {
-    return true;
-  }
-
-  return !/^(false|0|no|off)$/i.test(String(raw).trim());
+  // Owner approved automatic delivery on 2026-11-07 for agent-requested info.
+  return false;
 }
 
 function sendInfoEmailApprovalRequest_(data) {
+  // Keep the existing SMS/voice entry point, but fulfill the request directly.
+  return sendRequestedInfoEmail_(data);
+}
+
+function sendRequestedInfoEmail_(data) {
+  const hydrated = hydrateInfoEmailDataFromSheet_(data);
+  const identity = [normalizePhone_(hydrated.phone), normalizeEmailAddress_(hydrated.to),
+    hydrated.request_id || hydrated.conversation_id || hydrated.last_message || "",
+    hydrated.listing_address || ""].join("|");
+  const key = buildInfoEmailApprovalReceiptKey_(identity).replace("APPROVAL_RECEIPT", "AUTO_RECEIPT");
+  const props = PropertiesService.getScriptProperties();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let locked = true;
+  try {
+    const raw = props.getProperty(key);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (saved.sent_at) return Object.assign({ok: true, already_sent: true, approval_id: key, delivery_mode: "automatic"}, saved);
+      throw new Error("Information email delivery uncertain; reconcile original receipt before retry");
+    }
+    if (!isValidEmailAddress_(hydrated.to)) throw new Error("Missing valid information email recipient");
+    // Persist intent before transport. An interrupted/ambiguous send never retries blindly.
+    props.setProperty(key, JSON.stringify({started_at: new Date().toISOString(), to: hydrated.to}));
+    const backend = sendAgentInfoEmail_(hydrated);
+    const accepted = (backend.accepted || []).map(normalizeEmailAddress_);
+    if (!backend.ok || accepted.indexOf(normalizeEmailAddress_(hydrated.to)) < 0 || (backend.rejected || []).length) {
+      throw new Error("Information email recipient acceptance was not confirmed");
+    }
+    const receipt = {sent_at: new Date().toISOString(), to: hydrated.to,
+      subject: buildAgentInfoEmailSubject_(hydrated), backend: backend};
+    props.setProperty(key, JSON.stringify(receipt));
+    appendSmsDebugLog_("info_email_auto_sent", {phone: hydrated.phone, message: hydrated.to,
+      reason: receipt.subject, result: JSON.stringify(backend)});
+    return Object.assign({ok: true, approval_id: key, delivery_mode: "automatic"}, receipt);
+  } catch (err) {
+    lock.releaseLock();
+    locked = false;
+    sendHandoffEmail_({handoff_type: "INFO EMAIL DELIVERY REVIEW", agent_name: hydrated.agent_name,
+      last_name: hydrated.last_name, phone: hydrated.phone, email: hydrated.to,
+      listing_address: hydrated.listing_address, last_message: String(err)});
+    throw err;
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+}
+
+function sendLegacyInfoEmailApprovalRequest_(data) {
   const hydratedData = hydrateInfoEmailDataFromSheet_(data);
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("INFO_EMAIL_APPROVAL_TO") || props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
@@ -7322,6 +7357,7 @@ function requestInfoEmailApprovalForRow_(body) {
     phone: rowObj[HEADERS.phone] || body.phone || "",
     last_message: rowObj[HEADERS.last_inbound_text] || rowObj[HEADERS.response_status] || "",
     conversation_id: conversationId,
+    request_id: String(body && body.request_id || ""),
     playback_url: body && body.playback_url || "",
     conversation_summary: body && body.conversation_summary || "",
     conversation_transcript: body && body.conversation_transcript || ""
@@ -7575,6 +7611,7 @@ function htmlOutput_(result) {
   const details = result && result.ok
     ? "<p><strong>To:</strong> " + escapeHtmlForApprovalPage_(String(result.to || "")) + "</p>"
       + "<p><strong>Subject:</strong> " + escapeHtmlForApprovalPage_(String(result.subject || "")) + "</p>"
+      + "<p><strong>Send receipt:</strong> " + escapeHtmlForApprovalPage_(JSON.stringify(result.backend || {})) + "</p>"
     : "";
 
   return HtmlService.createHtmlOutput(

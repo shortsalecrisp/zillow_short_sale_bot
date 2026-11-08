@@ -7229,7 +7229,18 @@ def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text:
 def _sms_service_info_email_acknowledgement(has_email: bool = True, email: str = "") -> str:
     if not has_email or not email:
         return SMS_EMAIL_ADDRESS_REQUEST_REPLY
-    return f"Thanks, I have {email}. The information email is pending approval."
+    return f"Yes, I'll send it to {email} now."
+
+
+def _sms_send_requested_info_email(row: int, phone: str, email: str, request_id: str) -> None:
+    response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json={
+        "token": SMS_CHATBOT_ALLOWED_TOKEN, "action": "request_info_email_approval",
+        "row": row, "phone": phone, "email": email, "request_id": request_id,
+    }, timeout=45)
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok") or not result.get("sent_at"):
+        raise RuntimeError("Information email send receipt unavailable")
 
 
 def _sms_has_no_current_short_sale_help(value: Any) -> bool:
@@ -7737,18 +7748,17 @@ def _sms_question_priority_decision(
                 clear_callback=True,
                 reason="Agent requested information by email; collecting the address without call consent",
             )
-        # The Python fallback has no approval enqueue. Do not promise an email that
-        # only the primary Apps Script approval workflow can durably request.
+        # Delivery is performed through the same durable Apps Script sender before
+        # this acknowledgement can enter the SMS outbox.
         return _sms_decision(
+            reply_text=_sms_service_info_email_acknowledgement(True, target_email),
             lead_status="O" if covered else "Y",
             conversation_done=covered,
-            handoff_needed=True, block_reply=True,
-            handoff_type="INFO EMAIL APPROVAL REQUIRED",
             call_booking_status="information_requested",
             clear_callback=True,
             info_email_to=target_email,
-            info_email_approval_required=True,
-            reason="Information requested by email; owner approval is required before promising delivery",
+            info_email_approval_required=False,
+            reason="Information requested by email; send before acknowledging",
         )
 
     if _sms_is_unsupported_performance_stats_question(text) and not _sms_is_exact_closed_count_question(text):
@@ -9308,6 +9318,15 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         )
     else:
         decision = classified_decision
+    if decision.get("info_email_to") and not decision.get("handoff_needed") and not decision.get("block_reply"):
+        try:
+            _sms_send_requested_info_email(row_idx, phone_raw, decision["info_email_to"], message_id or request_id)
+        except Exception:
+            logger.exception("sms-chatbot: requested information email needs receipt review")
+            decision = _sms_decision(
+                handoff_needed=True, block_reply=True, handoff_type="INFO EMAIL DELIVERY REVIEW",
+                reason="Requested information email delivery needs review; no success acknowledgement sent",
+            )
     decision = _sms_enforce_first_person(decision)
     should_reply = _sms_should_reply(decision, auto_count)
     if should_reply and decision.get("preserve_reply_formatting"):

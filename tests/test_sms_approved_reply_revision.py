@@ -46,6 +46,7 @@ def chatbot(monkeypatch):
         raise AssertionError("A deterministic approved case must not invoke a model or network")
 
     monkeypatch.setattr(module, "_sms_openai_decision", forbid_model)
+    monkeypatch.setattr(module, "_sms_send_requested_info_email", lambda *args: None)
     sheet.rows[2] = [""] * len(CHATBOT_HEADERS)
 
     class Harness:
@@ -359,11 +360,11 @@ def test_email_before_call_is_not_call_consent_or_fake_delivery(chatbot, email):
         assert result["reply_text"] == EMAIL_REQUEST_REPLY
         assert result["handoff_needed"] is False
     else:
-        assert result["reply_text"] == ""
-        assert result["should_reply"] is False
-        assert result["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+        assert result["reply_text"] == f"Yes, I'll send it to {email} now."
+        assert result["should_reply"] is True
+        assert result["handoff_needed"] is False
         assert result["info_email_to"] == email
-        assert result["info_email_approval_required"] is True
+        assert result["info_email_approval_required"] is False
 
 
 def test_existing_provider_and_future_info_is_o_and_stores_new_address(chatbot):
@@ -375,11 +376,31 @@ def test_existing_provider_and_future_info_is_o_and_stores_new_address(chatbot):
     assert "sent" not in result["reply_text"].lower()
 
 
+def test_info_email_failure_never_enters_success_sms_outbox(chatbot, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("transport receipt uncertain")
+    monkeypatch.setattr(chatbot.module, "_sms_send_requested_info_email", fail)
+    result = chatbot.receive("Email me your information at agent@example.test")
+    assert result["should_reply"] is False
+    assert result["reply_text"] == ""
+    assert result["handoff_type"] == "INFO EMAIL DELIVERY REVIEW"
+
+
+def test_info_email_receipt_precedes_success_acknowledgement(chatbot, monkeypatch):
+    sends = []
+    monkeypatch.setattr(chatbot.module, "_sms_send_requested_info_email", lambda *args: sends.append(args))
+    result = chatbot.receive("Email me your information at agent@example.test")
+    assert len(sends) == 1
+    assert sends[0][2] == "agent@example.test"
+    assert result["should_reply"] is True
+    assert result["reply_text"] == "Yes, I'll send it to agent@example.test now."
+
+
 def test_housing_counselor_future_info_preserves_o(chatbot):
     chatbot.set(email="agent@example.test")
     result = chatbot.receive("We are working with a HUD Housing Counselor, but I will take more info on your services just in case")
     assert result["lead_status"] == "O"
-    assert result["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+    assert result["handoff_needed"] is False
 
 
 def test_documents_are_actual_answer_not_material_promise(chatbot):

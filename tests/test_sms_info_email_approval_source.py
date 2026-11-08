@@ -8,9 +8,9 @@ CHATBOT = (ROOT / "apps_script" / "sms_chatbot.js").read_text()
 def test_information_request_uses_approval_gated_acknowledgement():
     assert "reply_text: acknowledgementReply" in CHATBOT
     assert "sendInfoEmailApprovalRequest_(infoEmailData)" in CHATBOT
-    assert "INFO_EMAIL_APPROVAL_REQUIRED" in CHATBOT
+    assert "return sendRequestedInfoEmail_(data);" in CHATBOT
     assert "An agent requested the short-sale info email. Approval is required before sending." in CHATBOT
-    assert "The information email is pending approval" in CHATBOT
+    assert "Yes, I'll send it to " in CHATBOT
     assert "more information shortly" not in CHATBOT
 
 
@@ -79,8 +79,8 @@ def test_info_email_greeting_does_not_fall_back_to_hi_there():
 
 
 def test_info_email_acknowledgement_bypasses_phone_only_sanitizer():
-    assert "^Thanks, I have (?:your email|[A-Z0-9._%+-]+@" in CHATBOT
-    assert "the downstream approval workflow can recognize and queue the email" in CHATBOT
+    assert "text === getInfoEmailAcknowledgementReply_()" in CHATBOT
+    assert "delivery runs before returning it" in CHATBOT
 
 
 def test_explicitly_provided_email_replaces_stale_crm_email():
