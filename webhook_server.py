@@ -6998,11 +6998,12 @@ def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
 
 
 def _sms_is_reinforcing_decline_after_closeout(value: Any, row_obj: Dict[str, str]) -> bool:
-    if not _sms_is_closed_marketing_conversation(row_obj) or not _sms_has_previously_covered_context(row_obj):
+    if not _sms_is_closed_marketing_conversation(row_obj):
         return False
     text = _sms_normalize_whitespace(value).lower()
     if (
         not text
+        or _sms_is_opt_out(text)
         or _sms_is_substantive_followup(text)
         or _sms_is_fee_question(text)
         or _sms_is_information_delivery_request(text)
@@ -7016,6 +7017,12 @@ def _sms_is_reinforcing_decline_after_closeout(value: Any, row_obj: Dict[str, st
     return bool(
         _sms_has_existing_coverage(text)
         or _sms_has_decline_or_not_short_sale_clause(text)
+        or re.search(r"\b(?:i|we)(?:['’]?ll| will)?\s*(?:certainly|definitely)?\s*keep (?:you|u) posted\b", text)
+        or re.search(
+            r"\b(?:attorneys?|lawyers?|short[- ]sale negotiators?|processors?|teams?|companies?)\b.{0,80}"
+            r"\b(?:that\s+)?(?:i|we)\s+(?:already\s+)?(?:use|work\s+with|have)\b",
+            text,
+        )
         or re.search(
             r"\b(?:i|we)(?:['’]?ve| have)\s+(?:used|worked\s+with)\b.{0,70}\b(?:him|her|them|that\s+(?:team|company|person)|this\s+(?:team|company|person))\b"
             r"|\b(?:used|worked\s+with)\b.{0,50}\b(?:for\s+)?(?:a\s+few|several|many|dozens?|hundreds?|\d+)\b.{0,30}\bshort\s+sales?\b",
@@ -7273,6 +7280,11 @@ def _sms_has_self_handling_statement(value: Any) -> bool:
     text = _sms_rejection_text(value).replace("my self", "myself")
     return bool(
         re.search(
+            r"\b(?:i(?:\s+am|['’]?m)|we(?:\s+are|['’]?re))\s+"
+            r"(?:already\s+|currently\s+)?handling\s+(?:the\s+)?(?:bank|lender)\s+side\b",
+            text,
+        )
+        or re.search(
             r"\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b",
             text,
         )

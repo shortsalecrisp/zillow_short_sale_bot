@@ -2698,7 +2698,8 @@ function hasDirectQuestionSignal_(text) {
 
 function hasSelfHandlingStatement_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy self\b/g, "myself");
-  return /\b(?:i am|i'm)\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
+  return /\b(?:i(?: am|['’]m)|we(?: are|['’]re))\s+(?:already\s+|currently\s+)?handling\s+(?:the\s+)?(?:bank|lender)\s+side\b/.test(t) ||
+    /\b(?:i am|i'm)\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
     /\bi(?:'|’)?ve\b[^.!?]{0,100}\b(?:and\s+)?am\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
     /\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b/.test(t) ||
     /\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b/.test(t) ||
@@ -4161,13 +4162,16 @@ function isClosedMarketingConversation_(rowObj) {
 }
 
 function isReinforcingDeclineAfterCloseout_(text, rowObj) {
-  if (!isClosedMarketingConversation_(rowObj) || !hasPreviouslyCoveredContext_(rowObj)) return false;
+  if (!isClosedMarketingConversation_(rowObj)) return false;
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || isSubstantiveFollowupSignal_(t) || isPaymentOrFeeQuestionSignal_(t) ||
+  if (!t || isOptOutSignal_(t) || isSubstantiveFollowupSignal_(t) || isPaymentOrFeeQuestionSignal_(t) ||
       isEmailRequestSignal_(t) || extractEmailAddress_(t) || isPresentServiceInterestSignal_(t) ||
       isPhoneCallInterestSignal_(t) || isClientConsultationInterestSignal_(t) ||
+      isDirectHelpRequestSignal_(t) || isSchedulingSignal_(t) ||
       isFutureBuyerRecontactSignal_(t) || isFutureNegotiationInterestSignal_(t)) return false;
   return isAlreadyHandledSignal_(t) || isClearNoSignal_(t) ||
+    /\b(?:i|we)(?:['’]?ll| will)?\s*(?:certainly|definitely)?\s*keep (?:you|u) posted\b/.test(t) ||
+    /\b(?:attorneys?|lawyers?|short[- ]sale negotiators?|processors?|teams?|companies?)\b.{0,80}\b(?:that\s+)?(?:i|we)\s+(?:already\s+)?(?:use|work\s+with|have)\b/.test(t) ||
     /\b(?:i|we)(?:['’]?ve| have)\s+(?:used|worked\s+with)\b.{0,70}\b(?:him|her|them|that\s+(?:team|company|person)|this\s+(?:team|company|person))\b/.test(t) ||
     /\b(?:used|worked\s+with)\b.{0,50}\b(?:for\s+)?(?:a\s+few|several|many|dozens?|hundreds?|\d+)\b.{0,30}\bshort\s+sales?\b/.test(t);
 }
@@ -5030,6 +5034,7 @@ function isExistingCrispRelationshipSignal_(text) {
 function isSelfHandlingOpportunitySignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy\s+self\b/g, "myself");
   const selfHandling = [
+    /\b(?:i(?:\s+am|['’]?m)|we(?:\s+are|['’]?re))\s+(?:already\s+|currently\s+)?handling\s+(?:the\s+)?(?:bank|lender)\s+side\b/,
     /\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b/,
     /\bhandling (?:that part |it )?myself\b/,
     /\bhandle (?:that part |it )?myself\b/,

@@ -4237,6 +4237,72 @@ def test_sms_reinforcing_provider_decline_after_closeout_is_silent(monkeypatch):
     assert reopened["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
 
 
+def test_sms_first_person_lender_side_handling_is_self_handling(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "I'm already handling the Lender side")
+    assert decision["response_id"] == "self_handling_value"
+    assert "You keep the listing and client relationship" in decision["reply_text"]
+    assert "already have help" not in decision["reply_text"]
+
+    provider = module._sms_fast_decision({}, "We already have an attorney handling it.")
+    assert provider["lead_status"] == "H"
+    assert provider["conversation_done"] is True
+    assert "already have help" in provider["reply_text"]
+
+
+def test_sms_closeout_reinforcement_and_keep_posted_courtesy_are_silent(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    rejected_row = {
+        "mailshake_status": "R",
+        "ai_state": "done",
+        "call_booking_status": "closed_no_interest",
+        "response_status": "Not interested",
+        "conversation_summary": "Explicit refusal or non-provider coverage; closed out",
+        "last_outbound_text": module.SMS_STANDARD_CLOSEOUT_REPLY,
+        "history_json": json.dumps([
+            {"role": "agent", "text": "Not interested"},
+            {"role": "assistant", "text": module.SMS_STANDARD_CLOSEOUT_REPLY, "receipt_id": "sent"},
+        ]),
+    }
+    explanation = module._sms_fast_decision(
+        rejected_row,
+        "I have attorneys and short sale negotiators that we already use.",
+    )
+    assert explanation["block_reply"] is True
+    assert explanation["preserve_existing_state"] is True
+    assert explanation["reply_text"] == ""
+
+    covered_row = {
+        "mailshake_status": "O",
+        "ai_state": "done",
+        "call_booking_status": "closed_no_interest",
+        "response_status": "We already have a short sale negotiator on our side.",
+        "conversation_summary": "Current file already covered; relationship left open",
+        "last_outbound_text": "Thanks, I appreciate it. Feel free to reach out if a short sale comes up.",
+        "history_json": json.dumps([
+            {"role": "agent", "text": "We already have a short sale negotiator on our side."},
+            {"role": "assistant", "text": "Thanks, I appreciate it. Feel free to reach out if a short sale comes up.", "receipt_id": "sent"},
+        ]),
+    }
+    courtesy = module._sms_fast_decision(
+        covered_row,
+        "You're welcome and I'll certainly keep you posted.",
+    )
+    assert courtesy["block_reply"] is True
+    assert courtesy["preserve_existing_state"] is True
+    assert courtesy["reply_text"] == ""
+
+    reopened = module._sms_fast_decision(covered_row, "What is your fee?")
+    assert reopened["block_reply"] is False
+    assert reopened["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+
+
 def test_sms_contract_not_short_sale_and_source_question_use_distinct_closeouts(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

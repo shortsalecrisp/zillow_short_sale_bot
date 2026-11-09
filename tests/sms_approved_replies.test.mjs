@@ -105,6 +105,20 @@ test('first-person handling without myself gets the self-handler value response'
   assert.match(result.reply_text, /You keep the listing and client relationship/);
 });
 
+test('first-person lender-side handling is self-handling, not outside help', () => {
+  const h = smsHarness();
+  const result = h.incoming("I'm already handling the Lender side");
+  assert.equal(result.should_reply, true);
+  assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'self_handling_value');
+  assert.match(result.reply_text, /You keep the listing and client relationship/);
+  assert.doesNotMatch(result.reply_text, /already have help/i);
+
+  const provider = answer('We already have an attorney handling it.').r;
+  assert.equal(provider.lead_status, 'H');
+  assert.equal(provider.conversation_done, true);
+  assert.match(provider.reply_text, /already have help/i);
+});
+
 test('self-handler classification requires a first-person subject', () => {
   const selfHandler = answer('I do all the negotiating with the bank.').r;
   assert.equal(selfHandler.lead_status, 'Y');
@@ -136,6 +150,35 @@ test('provider loyalty after a completed coverage closeout is recorded without a
   assert.equal(result.conversation_done, true);
   assert.equal(h.state.ai_state, 'done');
   assert.equal(h.state.call_booking_status, 'closed_no_interest');
+});
+
+test('coverage explanation after an explicit rejection closeout stays silent', () => {
+  const h = smsHarness();
+  const first = h.incoming('Not interested');
+  assert.equal(first.should_reply, true);
+  assert.match(first.reply_text, /^Ok, no problem/);
+
+  const explanation = h.incoming('I have attorneys and short sale negotiators that we already use.');
+  assert.equal(explanation.should_reply, false);
+  assert.match(explanation.reason, /Reinforcing decline/);
+  assert.equal(h.state.ai_state, 'done');
+  assert.equal(h.state.call_booking_status, 'closed_no_interest');
+});
+
+test('keep-you-posted courtesy after a coverage closeout stays silent', () => {
+  const h = smsHarness();
+  const first = h.incoming("We already have a short sale negotiator on our side. I'll definitely keep your information for future deals. Thanks.");
+  assert.equal(first.should_reply, true);
+  assert.match(first.reply_text, /reach out if a short sale comes up/i);
+
+  const courtesy = h.incoming("You're welcome and I'll certainly keep you posted.");
+  assert.equal(courtesy.should_reply, false);
+  assert.match(courtesy.reason, /Reinforcing decline/);
+  assert.equal(h.state.call_booking_status, 'warm_future_interest');
+
+  const question = h.incoming('What is your fee?');
+  assert.equal(question.should_reply, true);
+  assert.match(question.reply_text, /\$5,000/);
 });
 
 test('a substantive question still reopens after a completed coverage closeout', () => {
