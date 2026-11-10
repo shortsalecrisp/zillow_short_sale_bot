@@ -1226,8 +1226,12 @@ function confirmedListingWithExplicitServiceDecline(conversation: ElevenLabsConv
         !/\bis\b.{0,120}\byour listing\b/i.test(item.message ?? "")) return false;
     const next = messages.slice(index + 1).find(turn =>
       turn.role === "user" && typeof turn.message === "string" && hasMeaningfulSpokenContent(turn.message));
-    if (!next?.message || !liveMessages.has(next.message)) return false;
+    if (!next?.message || (!liveMessages.has(next.message) && !hasLiveHumanAfterAutomatedScreening(conversation))) return false;
     const answer = normalizeText(next.message).replace(/[.!?]+/g, " ").replace(/\s+/g, " ").trim();
+    if (/^(?:yes|yeah|yep|it is)(?:[, ]+it is)?[, ]+(?:but|and)\b/.test(answer) &&
+        /\b(?:i|we) know how to (?:do|handle) short sales\b/.test(answer) &&
+        /\b(?:certified|experienced)\b/.test(answer) &&
+        /\b(?:thank you anyway|no thanks|not interested)\b/.test(answer)) return true;
     return /^(?:yes|yeah|yep|it is|that is mine|that's mine)[, ]+(?:but|and)[, ]+(?:(?:i'm|i am|we're|we are) (?:good|all set|fine|okay|ok)|no thanks|not interested|(?:i|we) (?:do not|don't|dont) need (?:any )?help)(?:[, ]+(?:thanks|thank you))?$/.test(answer);
   });
 }
@@ -1821,6 +1825,7 @@ export function hasLiveHumanGatekeeperEvidence(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
 ): boolean {
+  if (confirmedListingWithExplicitServiceDecline(conversation)) return false;
   const transcript = conversation.transcript ?? [];
   let lastScreeningIndex = -1;
   for (let index = 0; index < transcript.length; index += 1) {
@@ -2094,6 +2099,7 @@ export function shouldTreatAsAgentUnavailable(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
 ): boolean {
+  if (confirmedListingWithExplicitServiceDecline(conversation)) return false;
   if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsCallEndedByRequest(conversation)) {
     return false;
   }

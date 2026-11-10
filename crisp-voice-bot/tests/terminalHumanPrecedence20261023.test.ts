@@ -18,6 +18,27 @@ process.env.ALERT_EMAIL_TO = "";
 
 const load = () => import("../src/lib/elevenLabsPostCall");
 
+test("listing-confirmed certified refusal after Google screening outranks gatekeeper summary", async () => {
+  const q = await load();
+  const conversation = {
+    status: "done",
+    analysis: { transcript_summary: "A gatekeeper screened the call, then the user confirmed the listing and declined." },
+    metadata: { termination_reason: "Client disconnected: 1000", call_duration_secs: 43 },
+    transcript: [
+      { role: "user", message: "Hi. If you record your name and reason for calling, I'll see if this person is available." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at Seventy One Fifty Three BOGGY CREEK." },
+      { role: "user", message: "Thanks, Maya. Please stay on the line." },
+      { role: "user", message: "Hello?" },
+      { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. We help with short-sale lender paperwork. Is Seventy One Fifty Three BOGGY CREEK your listing?" },
+      { role: "user", message: "Yes, it is, but I know how to do short sales. I'm certified in it. Thank you anyway." },
+    ],
+  };
+  assert.equal(q.shouldTreatAsNotInterested(conversation), true);
+  assert.equal(q.shouldTreatAsGatekeeperAdminEarlyExit(conversation, "Char"), false);
+  assert.equal(q.shouldTreatAsAgentUnavailable(conversation, "Char"), false);
+  assert.equal(q.getAuthoritativeTerminalCallResult(conversation, 1, {firstName: "Char"}), "answered_not_interested");
+});
+
 test("Heesun-style explained-service refusal outranks the hangup fallback", async () => {
   const { getAuthoritativeTerminalCallResult, shouldTreatAsAgentHungUp, shouldTreatAsNotInterested } = await load();
   const conversation = {
