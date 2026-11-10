@@ -1,6 +1,13 @@
 from test_internal_sms_endpoint import _import_webhook_server, FakeSendResult
 
 
+def test_buyer_affordability_right_now_is_not_call_availability(monkeypatch):
+    module, _, _ = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    decision = module._sms_fast_decision({}, "Oh wow Okay, thanks most buyers don't have that much right now")
+    assert decision["handoff_needed"] is False
+    assert "buyer-paid fee" in decision["reply_text"]
+
+
 def test_under_contract_status_update_is_not_existing_help(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     decision = module._sms_fast_decision(

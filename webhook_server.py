@@ -5035,6 +5035,8 @@ def _sms_is_fee_amount_question(value: Any) -> bool:
 
 def _sms_is_buyer_cost_concern(value: Any) -> bool:
     text = _sms_rejection_text(value)
+    if re.search(r"\bbuyers?\b.{0,35}\b(?:don't|do not|can't|cannot)\s+have\s+(?:that|this)\s+much\b", text):
+        return True
     return bool(
         re.search(r"\bbuyer(?:s|'s)?\b", text)
         and re.search(r"\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b", text)
@@ -7832,7 +7834,7 @@ def _sms_question_priority_decision(
     interested = _sms_is_present_service_interest(text)
     status = "O" if covered and not interested else "Y"
     requests_call = _sms_is_phone_call_interest(text) or _sms_is_scheduled_callback(text)
-    call_now = bool(re.search(r"\b(?:free|available)\s+now\b|\bcall me now\b", text)) and not _sms_is_conditional_call(text)
+    call_now = bool(re.search(r"\b(?:free|available)\s+(?:right\s+)?now\b|\bcall me\s+(?:right\s+)?now\b", text)) and not _sms_is_conditional_call(text)
     fee_decision = _sms_fee_decision(row_obj, inbound_text) if flags["fee"] else None
     if fee_decision and fee_decision.get("handoff_needed"):
         return fee_decision

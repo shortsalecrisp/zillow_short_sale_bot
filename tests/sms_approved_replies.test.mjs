@@ -7,6 +7,17 @@ const answer = (text, row = {}, options = {}) => {
   return {h, r: h.incoming(text)};
 };
 
+test('buyer affordability right now is answered without call-now takeover', () => {
+  const h = smsHarness();
+  const r = h.incoming("Oh wow Okay, thanks most buyers don't have that much right now");
+  assert.equal(r.handoff_needed, false);
+  assert.match(r.reply_text, /buyer-paid fee/i);
+  for (const text of ["I'm free right now", "I'm available now", "Call me right now"]) {
+    assert.equal(h.evaluate(`isOpenCallWindowSignal_(${JSON.stringify(text)})`), true);
+  }
+  assert.equal(h.evaluate('isOpenCallWindowSignal_("I have no short sales right now")'), false);
+});
+
 test('an exact delayed reaction to an older bot reply is suppressed before human handoff', () => {
   const olderReply = 'I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval.';
   const h = smsHarness({

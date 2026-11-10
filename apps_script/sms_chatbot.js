@@ -2463,6 +2463,7 @@ function buildReferralCompanyInfoDecision_() {
 
 function isBuyerCostConcernSignal_(text) {
   const t = normalizeLanguageSignalText_(text);
+  if (/\bbuyers?\b.{0,35}\b(?:don't|do not|can't|cannot)\s+have\s+(?:that|this)\s+much\b/.test(t)) return true;
   return /\bbuyer(?:s|'s)?\b/.test(t) && /\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b/.test(t) &&
     /\b(?:lower|reduce|factor|affect|concern|worried|worry|deter|discourage|willing|afford|scare|account|confused|how|why|hesitant|reluctant|issue|problem|refus\w*|won't|will not|wouldn't|would not|can't|cannot|couldn't|could not|don't think|do not think|what if)\b/.test(t) &&
     !isBuyerProvisionQuestionSignal_(t);
@@ -4186,7 +4187,8 @@ function isOpenCallWindowSignal_(text) {
     /\bfree now\b/,
     /\bnow works\b/,
     /\banytime now\b/,
-    /\bright now\b/
+    /\b(?:free|available)\s+right now\b/,
+    /\bcall me\s+(?:right\s+)?now\b/
   ];
 
   const callbackWindowPatterns = [
