@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getVoiceBotFirstAttemptWindowName } from "../src/lib/voiceSheet";
 import { formatVoiceAttemptIdentity } from "../src/lib/voicePhoneIdentity";
+import {
+  formatVoiceAutomatedCallCancellation,
+  isVoiceAutomatedCallCancelled,
+  parseVoiceAutomatedCallCancellation,
+} from "../src/lib/voiceAutomatedCallCancellation";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -13,15 +18,58 @@ process.env.GOOGLE_SHEETS_TAB_NAME = "Sheet1";
 
 let nextFixturePhone = 21_755_50200;
 
+test("approved current-phone cancellation blocks every automated call and replacement lane", async () => {
+  const q = await import("../src/lib/voiceQueue");
+  const rowNumber = 6267;
+  const values = scheduledRow("2026-11-06T16:00:00.000Z", {
+    call1SentAt: "2026-11-09T22:16:51.000Z",
+    call1Result: "call_start_failed",
+    scheduledFor: "2026-11-10T17:31:42.648Z",
+  });
+  const phone = String(values[2]);
+  const marker = formatVoiceAutomatedCallCancellation({
+    rowNumber,
+    phone,
+    approvedAt: "2026-11-07T19:00:00.000Z",
+    reason: "Yoni approved no further automated calls to this current phone",
+  });
+  values[29] = "yes";
+  values[30] = "voice_call_2_due";
+  values[41] = `${values[41]}\n${marker}`;
+
+  assert.equal(parseVoiceAutomatedCallCancellation(values[41])?.phone, phone);
+  assert.equal(q.getVoiceBotCallCandidateFromRowValues(rowNumber, values, new Date("2026-11-10T17:31:42.648Z")), undefined);
+
+  const noStart = scheduledRow("2026-11-06T16:00:00.000Z", {
+    scheduledFor: "2026-11-08T13:15:00.000Z",
+  });
+  noStart[2] = phone;
+  noStart[10] = "N";
+  noStart[29] = "yes";
+  noStart[30] = "voice_call_1_due";
+  noStart[41] = marker;
+  assert.equal(q.getScheduledVoiceNoStartRecoveryPlan(rowNumber, noStart, new Date("2026-11-09T13:15:00.000Z")), undefined);
+
+  values[2] = "+12175559999";
+  assert.equal(parseVoiceAutomatedCallCancellation(values[41])?.phone, phone, "marker remains auditable");
+  assert.equal(isVoiceAutomatedCallCancelled(rowNumber, values), false, "a new current phone needs its own review");
+});
+
 test("uncertain-start reconciliation never retries absent receipts or overwrites fresh protected state", async () => {
   const q = await import("../src/lib/voiceQueue");
   const sent = "2026-10-23T19:00:00Z", now = new Date("2026-10-23T19:21:00Z");
-  for (const mode of ["missing", "callback", "duplicate", "failed"] as const) {
+  for (const mode of ["missing", "callback", "duplicate", "cancelled", "failed"] as const) {
     const values = row("2026-10-22T12:00:00Z", { call1SentAt: sent, call1Result: "call_start_uncertain" });
     const marker = { rowNumber: 7000, callAttemptNumber: 1 as const, callStartRequestId: "synthetic-request", requestStartedAtUnixSecs: Date.parse(sent)/1000,
       scheduledWindow: "reach_afternoon_v1", agentTimeZone: "America/New_York" };
     values[41] = q.formatVoiceCallStartUncertainMarker(marker);
     const current = [...values]; if (mode === "callback") current[37] = "yes";
+    if (mode === "cancelled") current[41] = `${current[41]}\n${formatVoiceAutomatedCallCancellation({
+      rowNumber: 7000,
+      phone: String(current[2]),
+      approvedAt: "2026-10-23T19:20:00.000Z",
+      reason: "Approved no further automated calls",
+    })}`;
     let writes = 0;
     const column = (range: string) => { let n=0; for(const c of range.split("!")[1].match(/^[A-Z]+/)![0]) n=n*26+c.charCodeAt(0)-64; return n-1; };
     const sheets = { spreadsheets: { values: {

@@ -22,6 +22,7 @@ import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION
 import { formatVoiceAttemptIdentity, getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 import { finalUnansweredPreservationReason } from "./voiceFinalUnanswered";
 import { currentPhoneVoiceRow } from "./voicePhoneEpisode";
+import { isVoiceAutomatedCallCancelled } from "./voiceAutomatedCallCancellation";
 import { voiceListingAddressBlockReason } from "./voiceListingAddress";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
@@ -197,6 +198,7 @@ export function getScheduledVoiceNoStartRecoveryPlan(
   now: Date,
 ): VoiceScheduledNoStartRecoveryPlan | undefined {
   rowValues = currentPhoneVoiceRow(rowValues);
+  if (isVoiceAutomatedCallCancelled(rowNumber, rowValues)) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
       getVoiceOverdueFallbackPlan(rowNumber, rowValues, now)) return undefined;
   const leadStatus = normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]).toUpperCase();
@@ -477,6 +479,7 @@ export function getVoiceBotCallCandidateFromRowValues(
   now: Date,
 ): VoiceQueueCandidate | undefined {
   rowValues = currentPhoneVoiceRow(rowValues);
+  if (isVoiceAutomatedCallCancelled(rowNumber, rowValues)) return undefined;
   if (voiceListingAddressBlockReason(rowValues[VOICE_BOT_COL_LISTING_ADDRESS - 1])) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) ||
       normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
@@ -1100,6 +1103,13 @@ export async function reconcileUncertainVoiceCallStarts(
         const fresh = await sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
           range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${row.rowNumber}:AP${row.rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" });
         const values = fresh.data.values?.[0] ?? [];
+        if (isVoiceAutomatedCallCancelled(row.rowNumber, values)) {
+          logger.info("Definitive call-start failure remains cancelled; no replacement scheduled", {
+            rowNumber: row.rowNumber,
+            phone: metadata.requestedPhone,
+          });
+          continue;
+        }
         if (normalizePhoneToE164(values[2]) !== metadata.requestedPhone ||
             buildVoiceBotListingAddress(values) !== metadata.listingAddress ||
             values.slice(0, 2).map(normalizeString).filter(Boolean).join(" ") !== metadata.fullName ||
