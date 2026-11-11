@@ -75,6 +75,13 @@ export async function readGmailImportState<T>(key: string, fallback: T, strict =
   return parseGmailImportState(row[1] ?? "", fallback, strict);
 }
 
+export async function listGmailImportStates<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
+  if (!prefix) throw new Error("A bounded state prefix is required");
+  const rows = (await readStateRows()).filter(row => row[0]?.startsWith(prefix));
+  if (new Set(rows.map(row => row[0])).size !== rows.length) throw new Error("Duplicate notification state; reconcile before delivery");
+  return rows.map(row => ({ key: row[0], value: parseGmailImportState<T>(row[1] ?? "", undefined as T, true) }));
+}
+
 export async function writeGmailImportState(key: string, value: unknown): Promise<void> {
   const rows = await readStateRows();
   const sheets = await getGoogleSheetsClient();

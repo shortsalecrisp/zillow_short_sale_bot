@@ -23,6 +23,8 @@ import sheetUpdateRouter from "./routes/sheetUpdate";
 import telnyxWebhookRouter from "./routes/telnyxWebhook";
 import voiceQueueRouter from "./routes/voiceQueue";
 import returnCallsRouter, { returnCallsReady } from "./routes/returnCalls";
+import callbackAlertsRouter from "./routes/callbackAlerts";
+import { getVoiceCallbackAlertStatus, startVoiceCallbackAlertWorker } from "./lib/voiceCallbackAlerts";
 
 const app = express();
 
@@ -102,6 +104,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       monitorStartedAt: config.voiceQueue.finalReceiptMonitorStartedAt.toISOString(),
     },
     providerStartFailures: getProviderStartFailureStatus(),
+    callbackAlerts: getVoiceCallbackAlertStatus(),
     scheduledNoStartRecovery: {
       enforced: true,
       monitorStartedAt: config.voiceQueue.scheduledNoStartMonitorStartedAt.toISOString(),
@@ -126,6 +129,7 @@ app.use("/voice-queue", voiceQueueRouter);
 app.use("/mailshake-sync", mailshakeSyncRouter);
 app.use("/gmail-import", gmailImportRouter);
 app.use("/info-email", infoEmailRouter);
+app.use("/callback-alerts", callbackAlertsRouter);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({
@@ -173,6 +177,7 @@ app.listen(config.port, () => {
   startVoiceQueueScheduler();
   startMailshakeSyncScheduler();
   startGmailImportSchedulers();
+  startVoiceCallbackAlertWorker();
 });
 
 // TODO: Add live transfer support once call qualification logic is ready.

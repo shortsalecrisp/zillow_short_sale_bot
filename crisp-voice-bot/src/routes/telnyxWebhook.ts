@@ -14,7 +14,7 @@ import {
   setYoniCallControlId,
 } from "../lib/liveTransferStore";
 import { logger } from "../lib/logger";
-import { sendCallbackEmail } from "../lib/sendCallbackEmail";
+import { sendLegacyTelnyxCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
 import { decodeLiveTransferClientState, gatherUsingAi, gatherUsingSpeak, hangupCall, speakText } from "../lib/telnyx";
 import type { CallState, SheetUpdateRequest, TelnyxWebhookEvent, TelnyxWebhookPayload, TestOutcome } from "../types";
@@ -319,7 +319,7 @@ function queueCallbackEmail(callControlId: string, outcome: PromptOutcome): void
 
   void (async () => {
     try {
-      await sendCallbackEmail({
+      await sendLegacyTelnyxCallbackEmail({
         agentName: state?.fullName ?? "Unknown",
         phone: state?.destinationPhone ?? "Unknown",
         email: state?.email,

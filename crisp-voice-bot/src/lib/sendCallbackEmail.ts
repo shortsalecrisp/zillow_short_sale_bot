@@ -1,7 +1,7 @@
 import { createEmailTransporter, escapeHtml, formatPhoneNumber, requireEmailConfig } from "./emailAlerts";
 import { buildElevenLabsPlaybackUrl } from "./elevenLabsPlayback";
 
-type CallbackEmailInput = {
+export type CallbackEmailInput = {
   agentName: string;
   phone: string;
   email?: string;
@@ -50,7 +50,7 @@ export function buildCallbackEmailMessage({
   details,
 }: CallbackEmailInput): CallbackEmailMessage {
   const formattedPhone = formatDashedPhoneNumber(phone);
-  const effectiveCallbackTime = callbackTime?.trim() || "Unspecified";
+  const effectiveCallbackTime = callbackTime?.trim() || "Not specified by caller";
   const effectiveEmail = email?.trim() || "";
   const safeConversationId = conversationId?.trim();
   const playbackUrl = safeConversationId ? buildElevenLabsPlaybackUrl(safeConversationId) : undefined;
@@ -58,11 +58,11 @@ export function buildCallbackEmailMessage({
     conversationTranscript?.trim() ||
     conversationDescription?.trim() ||
     "No conversation transcript available.";
-  const effectiveSubject = subject ?? `NEW LEAD 🔥 - SCHEDULED CALLBACK - ${agentName}`;
-  const scheduledTimeLine = handoffType === "Callback Request" ? `Scheduled Time: ${effectiveCallbackTime}\n` : "";
+  const effectiveSubject = subject ?? `HOT LEAD - PHONE CALLBACK REQUEST - ${agentName}`;
+  const scheduledTimeLine = handoffType === "Callback Request" ? `Requested Timing: ${effectiveCallbackTime}\nThis is a request, not a booked appointment.\n` : "";
   const scheduledTimeHtml =
     handoffType === "Callback Request"
-      ? `<strong>Scheduled Time:</strong> ${escapeHtml(effectiveCallbackTime)}<br>\n`
+      ? `<strong>Requested Timing:</strong> ${escapeHtml(effectiveCallbackTime)}<br>\nThis is a request, not a booked appointment.<br>\n`
       : "";
 
   const text = `We have a new lead interested in your services, and a manual follow-up is now needed.
@@ -72,8 +72,9 @@ ${scheduledTimeLine}Agent Name: ${agentName}
 Phone: ${formattedPhone}
 Email: ${effectiveEmail}
 Address: ${listingAddress}
+Sheet row: ${rowNumber}
 ${safeConversationId ? `Conversation ID: ${safeConversationId}\n` : ""}${playbackUrl ? `Playback: ${playbackUrl}\n` : ""}
-
+${action ? `Next action: ${action}\n` : ""}${details ? `Request evidence: ${details}\n` : ""}${conversationDescription ? `Call summary: ${conversationDescription}\n` : ""}
 Full Convo:
 ${fullConversation}`;
 
@@ -82,8 +83,11 @@ ${fullConversation}`;
 ${scheduledTimeHtml}<strong>Agent Name:</strong> ${escapeHtml(agentName)}<br>
 <strong>Phone:</strong> ${escapeHtml(formattedPhone)}<br>
 <strong>Email:</strong> ${escapeHtml(effectiveEmail)}<br>
-<strong>Address:</strong> ${escapeHtml(listingAddress)}${safeConversationId ? `<br>\n<strong>Conversation ID:</strong> ${escapeHtml(safeConversationId)}` : ""}</p>
+<strong>Address:</strong> ${escapeHtml(listingAddress)}<br><strong>Sheet row:</strong> ${rowNumber}${safeConversationId ? `<br>\n<strong>Conversation ID:</strong> ${escapeHtml(safeConversationId)}` : ""}</p>
 ${playbackUrl ? `<p><strong>Playback:</strong> <a href="${escapeHtml(playbackUrl)}" target="_blank" rel="noopener noreferrer">Play call recording</a></p>` : ""}
+${action ? `<p><strong>Next action:</strong> ${escapeHtml(action)}</p>` : ""}
+${details ? `<p><strong>Request evidence:</strong> ${escapeHtml(details)}</p>` : ""}
+${conversationDescription ? `<p><strong>Call summary:</strong> ${escapeHtml(conversationDescription)}</p>` : ""}
 <p><strong>Full Convo:</strong><br>${escapeHtml(fullConversation).replace(/\n/g, "<br>")}</p>`;
 
   return {
@@ -93,7 +97,13 @@ ${playbackUrl ? `<p><strong>Playback:</strong> <a href="${escapeHtml(playbackUrl
   };
 }
 
-export async function sendCallbackEmail(input: CallbackEmailInput): Promise<void> {
+export async function sendInformationOwnerAlertEmail(input: CallbackEmailInput): Promise<void> {
+  if (input.handoffType !== "Information Request") throw new Error("Phone callbacks must use the verified durable callback alert path");
+  await sendLegacyTelnyxCallbackEmail(input);
+}
+
+// Retained for the inactive keypad/Telnyx flow; production Maya uses voiceCallbackAlerts.
+export async function sendLegacyTelnyxCallbackEmail(input: CallbackEmailInput): Promise<void> {
   const emailConfig = requireEmailConfig();
   const transporter = createEmailTransporter(emailConfig);
   const { subject, text, html } = buildCallbackEmailMessage(input);

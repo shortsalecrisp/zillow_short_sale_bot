@@ -498,7 +498,7 @@ test("normal goodbye after callback and late questions without a stop retain the
 
 test("final direct-callback timing corrects model-added PM only from attributable caller words", async () => {
   const lib = await load();
-  const call = { ...conversation([], "The caller requested a callback tomorrow at 2:00 PM Pacific."), transcript: [
+  const call = { ...conversation([], "The caller requested a callback tomorrow at 2:00 PM Pacific."), metadata:{call_duration_secs:60},transcript: [
     { role: "user", message: "Have him call tomorrow at two Pacific." },
     { role: "agent", tool_calls: [{ tool_name: "callback_requested", parameters: { callbackTime: "tomorrow at 2:00 PM Pacific" } }] },
     { role: "agent", message: "I've noted your request for tomorrow at 2:00 PM Pacific." },
@@ -508,7 +508,8 @@ test("final direct-callback timing corrects model-added PM only from attributabl
   const id = "test-direct-callback-time-correction";
   conversations.set(id, call);
   const before = receivedWrites.length;
-  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
+  assert.equal(await lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome,
+    callbackAlerts:{enqueue:async()=>"awaiting_final",settle:async()=>"accepted"},requestQueueRefill:async()=>{} }),true);
   assert.equal(receivedWrites.length, before + 1);
   assert.equal(receivedWrites.at(-1)!.callResult, "callback_requested", "Final evidence repairs a missing live request write");
   assert.equal(receivedWrites.at(-1)!.callbackRequested, "yes");
@@ -525,7 +526,7 @@ test("incidental showing or closing times do not replace requested callback timi
     "I have a closing tomorrow afternoon. Goodbye.",
     "Actually, I have a meeting at four tomorrow.",
   ].entries()) {
-    const call = { ...conversation([], "The caller requested a callback."), transcript: [
+    const call = { ...conversation([], "The caller requested a callback."),metadata:{call_duration_secs:60}, transcript: [
       { role: "user", message: "Have him call tomorrow at two Pacific." },
       { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
       { role: "agent", message: "Thanks. I've received your callback request." },
@@ -535,7 +536,8 @@ test("incidental showing or closing times do not replace requested callback timi
     const id = `test-incidental-callback-time-${index}`;
     conversations.set(id, call);
     const before = receivedWrites.length;
-    await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
+    assert.equal(await lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome,
+      callbackAlerts:{enqueue:async()=>"awaiting_final",settle:async()=>"accepted"},requestQueueRefill:async()=>{} }),true);
     assert.equal(receivedWrites.length, before + 1);
     assert.equal(receivedWrites.at(-1)!.callbackTime, "tomorrow at two Pacific", comment);
   }
@@ -543,7 +545,7 @@ test("incidental showing or closing times do not replace requested callback timi
 
 test("a final callback without attributable timing does not replace the earlier sheet time", async () => {
   const lib = await load();
-  const call = { ...conversation([], "The callback was requested for 2 PM."), transcript: [
+  const call = { ...conversation([], "The callback was requested for 2 PM."),metadata:{call_duration_secs:60}, transcript: [
     { role: "user", message: "Please call me back." },
     { role: "agent", tool_calls: [{ tool_name: "callback_requested", parameters: { callbackTime: "2 PM" } }] },
     { role: "user", message: "Goodbye." },
@@ -552,7 +554,8 @@ test("a final callback without attributable timing does not replace the earlier 
   const id = "test-direct-callback-no-time-evidence";
   conversations.set(id, call);
   const before = receivedWrites.length;
-  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
+  assert.equal(await lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome,
+    callbackAlerts:{enqueue:async()=>"awaiting_final",settle:async()=>"accepted"},requestQueueRefill:async()=>{} }),true);
   assert.equal(receivedWrites.length, before + 1);
   assert.equal(receivedWrites.at(-1)!.callbackTime, undefined);
   assert.equal(receivedWrites.at(-1)!.responseStatus, undefined);

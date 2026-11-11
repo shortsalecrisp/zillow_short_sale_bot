@@ -224,7 +224,8 @@ axios.defaults.adapter = async (request) => {
 after(() => assert.deepEqual(unexpectedRequests, [], "Even caught transport failures must not hide an unexpected URL"));
 
 async function invokeRequestTool(path: string, fields: Record<string, unknown>) {
-  const { default: router } = await import("../src/routes/elevenLabs");
+  const { createElevenLabsRouter } = await import("../src/routes/elevenLabs");
+  const router = createElevenLabsRouter({ enqueueCallbackAlert: async () => "awaiting_final" });
   const layer = router.stack.find((item: { route?: { path?: string } }) => item.route?.path === path);
   assert.ok(layer?.route, "Expected actual route handler");
   let status: number | undefined;

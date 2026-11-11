@@ -9,7 +9,8 @@ import {
   recordTelnyxD17Failure,
   resetProviderCircuit,
 } from "./providerCircuitBreaker";
-import { sendCallbackEmail } from "./sendCallbackEmail";
+import { sendInformationOwnerAlertEmail } from "./sendCallbackEmail";
+import { voiceCallbackAlerts } from "./voiceCallbackAlerts";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { notifyMissingHandoffReview, type MissingHandoffReview } from "./voiceHandoffReviewAlert";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
@@ -31,6 +32,7 @@ const RETRY_DELAY_MS = 30_000;
 type PostCallOptions = {
   postSheetUpdate?: (payload: SheetUpdateRequest) => Promise<void>;
   notifyHandoffReview?: typeof notifyMissingHandoffReview;
+  callbackAlerts?: Pick<typeof voiceCallbackAlerts, "enqueue" | "settle">;
 };
 
 type ElevenLabsTranscriptItem = {
@@ -511,49 +513,7 @@ function extractCallbackTime(conversation: ElevenLabsConversation): string | und
 }
 
 export function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
-  if (
-    shouldTreatAsRecordingArtifact(conversation) ||
-    shouldTreatAsDoNotCall(conversation) ||
-    shouldTreatAsCallEndedByRequest(conversation) ||
-    shouldTreatAsDeferredContact(conversation)
-  ) {
-    return false;
-  }
-
-  if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
-    return false;
-  }
-
-  if (endedBecauseCallerStoppedResponding(conversation)) {
-    return false;
-  }
-
-  const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
-  const userText = normalizeText(userMessages(conversation).join(" "));
-
-  return (
-    userText.includes("call me back") ||
-    userText.includes("call us back") ||
-    userText.includes("call you back") ||
-    userText.includes("call back later") ||
-    userText.includes("give me a call") ||
-    userText.includes("have yoni call") ||
-    userText.includes("have him call") ||
-    userText.includes("ask him to call") ||
-    userText.includes("yoni can call") ||
-    userText.includes("reach out to me") ||
-    userText.includes("reach back out") ||
-    userText.includes("call later") ||
-    userText.includes("call tomorrow") ||
-    summary.includes("requested a callback") ||
-    summary.includes("asked for a callback") ||
-    summary.includes("requested a call back") ||
-    summary.includes("asked for a call back") ||
-    summary.includes("asked yoni to call") ||
-    summary.includes("wanted yoni to call") ||
-    summary.includes("arranged for yoni to call") ||
-    summary.includes("scheduled callback")
-  );
+  return !shouldTreatAsCallEndedByRequest(conversation) && Boolean(getExplicitCallbackConsent(conversation));
 }
 
 export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversation): boolean {
@@ -773,7 +733,7 @@ function directCallbackRequestClause(value: string): string | undefined {
   let request: string | undefined;
   for (const match of value.matchAll(/(?:^|[.!?;,])\s*([^.!?;,]+)/g)) {
     const clause = normalizeText(match[1]);
-    if (!/^(?:(?:yes|sure|ok(?:ay)?)[, ]+)?(?:(?:please|can you|could you|you can)[, ]+)?(?:call (?:me|us) (?:back|later|tomorrow)|(?:have|ask) (?:yoni|him) (?:to )?call (?:(?:me|us)(?: back)?|back|later|tomorrow|today|asap|at|after|around)|give (?:me|us) a call)\b/.test(clause)) continue;
+    if (!/^(?:(?:yes|sure|ok(?:ay)?)[, ]+)?(?:(?:please|can you|could you|would you|you can)[, ]+)?(?:call (?:me|us)(?=$|\s+(?:back|later|tomorrow|today|tonight|at|after|around|on|next|this|in|when|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)|(?:have|ask) (?:yoni|him) (?:to )?call (?:(?:me|us)(?: back)?|back|later|tomorrow|today|asap|at|after|around)|give (?:me|us) a call|(?:i(?:'d| would) like|i want|i need|can i (?:get|have)) (?:a )?call ?back)\b/.test(clause)) continue;
     const start = match.index! + match[0].indexOf(match[1]);
     const prefix = normalizeText(value.slice(0, start));
     if (/\b(?:don't|dont|do not|never|not)[,; ]*$/.test(prefix) || /\b(?:if|unless)\b/i.test(value)) continue;
@@ -798,8 +758,9 @@ export function getExplicitCallbackConsent(conversation: ElevenLabsConversation)
     const text = normalizeText(item.message);
     const directRequest = directCallbackRequestClause(item.message);
     const scopedText = directRequest ? normalizeText(directRequest) : text;
+    const emailOnly = /\b(?:email|text)[- ]only\b|\b(?:only|just) (?:email|text) (?:me|us)\b|\b(?:only|just) send (?:me|us) (?:an? )?(?:email|text)\b|\b(?:email|text)(?: me| us)?(?: the (?:information|info|details))? instead\b/.test(text);
     const timingAnswer = callbackTimingWords(directRequest ?? item.message, /\b(?:what|which) (?:day|time)\b|\bwhen\b.{0,50}\bcall\b/i.test(precedingAssistant));
-    if (/\b(?:cancel|never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you|(?:can|could|may) i call you(?: back)?)\b/.test(scopedText) ||
+    if (emailOnly || /\b(?:cancel|never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you|(?:can|could|may) i call you(?: back)?)\b/.test(scopedText) ||
       (/\bnot now\b/.test(scopedText) && !timingAnswer) ||
       /^(?:no|nope|not today)[.! ]*$/.test(scopedText)) {
       consent = undefined;
@@ -2517,6 +2478,39 @@ async function processPostCallOutcomeForConversationUnlocked(
       fullName: metadata.fullName, listingAddress: metadata.listingAddress },
   });
 
+  // A verified callback is stronger than an earlier affirmative needs answer or
+  // a generic hangup. Save notification work before lead persistence can fail.
+  const callbackConsent = getExplicitCallbackConsent(conversation);
+  if (callbackConsent) {
+    if (!["done", "failed"].includes(conversation.status ?? "") || !(Number(conversation.metadata?.call_duration_secs) > 0)) return false;
+    const alerts = options.callbackAlerts ?? voiceCallbackAlerts;
+    await alerts.enqueue({ conversationId, rowNumber: metadata.rowNumber, callAttemptNumber: metadata.callAttemptNumber,
+      agentName: metadata.fullName, phone: metadata.requestedPhone, listingAddress: metadata.listingAddress,
+      testMode: metadata.testMode, providerProofCall: metadata.providerProofCall });
+    const callbackTime = callbackConsent.callbackTime;
+    const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
+    const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
+    const previouslyCaptured = hasToolCall(conversation, "callback_requested");
+    const endedByRequest = shouldTreatAsCallEndedByRequest(conversation);
+    const payload = { rowNumber: metadata.rowNumber, callAttemptNumber: metadata.callAttemptNumber,
+      ...(endedByRequest ? buildVoiceContactOutcomeUpdates("call_end_requested", conversation) : {
+        callResult: "callback_requested", callbackRequested: "yes",
+        ...(!previouslyCaptured ? { leadStatusCode: handoffReady ? "G" : "Y" } : {}),
+        ...(!previouslyCaptured || callbackConsent.timingSource === "caller" ? { responseStatus: outcome, callbackTime } : {}),
+      }),
+      voiceNotes: buildPerformanceNotes(outcome), voiceTerminalReceipt: { conversationId, phone: metadata.requestedPhone,
+        fullName: metadata.fullName, listingAddress: metadata.listingAddress } };
+    let persistenceError: unknown;
+    try { await (options.postSheetUpdate ?? persistVoiceContactOutcome)(payload); }
+    catch (error) { persistenceError = error; }
+    const notification = await alerts.settle(conversationId);
+    logger.info("Verified phone callback captured and owner alert reconciled", { conversationId, rowNumber: metadata.rowNumber,
+      callbackTime, notification, owningPersistenceConfirmed: !persistenceError });
+    if (persistenceError) throw persistenceError;
+    processedConversationIds.add(conversationId);
+    return true;
+  }
+
   if (terminalCallResult) {
     if (conversation.status !== "done" && conversation.status !== "failed") return false;
     const outcome = buildVoiceResponseStatus(terminalCallResult, undefined, metadata.assistantName);
@@ -2878,7 +2872,7 @@ async function processPostCallOutcomeForConversationUnlocked(
         rowNumber: metadata.rowNumber,
         message: error instanceof Error ? error.message : String(error),
       });
-      await sendCallbackEmail({
+      await sendInformationOwnerAlertEmail({
         agentName: metadata.fullName,
         phone: metadata.dialedPhone,
         email: extractInformationRequestEmail(conversation) || metadata.email,
@@ -2909,65 +2903,6 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (hasToolCall(conversation, "callback_requested") && !shouldTreatAsDeferredContact(conversation) &&
-    (!hasLiveTransferRequest(conversation) || getExplicitCallbackConsent(conversation))) {
-    const callbackConsent = getExplicitCallbackConsent(conversation);
-    const callbackTime = callbackConsent?.callbackTime ??
-      (isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified"));
-    const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
-    const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
-
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      ...(hasLiveTransferRequest(conversation) ? {
-        callResult: "callback_requested",
-        responseStatus: outcome,
-        callbackRequested: "yes",
-        callbackTime,
-      } : callbackConsent?.timingSource === "caller" && callbackTime !== "unspecified" ? {
-        // Final caller evidence can correct a model-supplied live tool time.
-        // Missing evidence must not erase the earlier request's timing.
-        callResult: "callback_requested",
-        responseStatus: outcome,
-        callbackRequested: "yes",
-        callbackTime,
-      } : {}),
-      voiceNotes: buildPerformanceNotes(outcome),
-    });
-
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      action: "Call this lead back at the requested time",
-      callbackTime,
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details:
-        "The callback tool fired during the live call. This post-call email includes the completed transcript and playback link.",
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback sent transcript-rich callback email after live callback tool", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callbackTime,
-      handoffReady,
-    });
-    return true;
-  }
 
   if (hasToolCall(conversation, "not_interested") && shouldTreatAsDeferredContact(conversation)) {
     const outcome = buildVoiceResponseStatus("deferred_contact");
@@ -3117,111 +3052,7 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (shouldTreatAsAcceptedTransferCallback(conversation)) {
-    const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
-    const outcome = buildCallbackResponseStatus(callbackTime, true);
 
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "callback_requested",
-      responseStatus: outcome,
-      leadStatusCode: "G",
-      callbackRequested: "yes",
-      callbackTime,
-      liveTransferRequested: "yes",
-      liveTransferCompleted: "",
-      voiceNotes: buildPerformanceNotes(
-        outcome,
-        "The immediate transfer did not complete. Actual caller words separately authorized the callback; its timing is retained from that request or accepted offer.",
-      ),
-    });
-
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      action: "Call this interested lead at the explicitly requested time",
-      callbackTime,
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details:
-        "The caller separately authorized a callback after the unsuccessful immediate transfer. Follow the actual requested timing, not an inferred ASAP fallback.",
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback converted accepted failed transfer into callback", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callbackTime,
-    });
-    return true;
-  }
-
-  if (shouldTreatAsMisfiredTransferInterestedCallback(conversation)) {
-    const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
-    const outcome = buildCallbackResponseStatus(callbackTime, true);
-
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "callback_requested",
-      responseStatus: outcome,
-      leadStatusCode: "Y",
-      callbackRequested: "yes",
-      callbackTime,
-      liveTransferRequested: "",
-      liveTransferCompleted: "",
-      voiceNotes: buildPerformanceNotes(
-        outcome,
-        "The live transfer was not clearly authorized. Actual caller words separately authorized a callback; its requested timing is retained.",
-      ),
-    });
-
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      action: "Call this interested lead back",
-      callbackTime,
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details:
-        "The live transfer lacked clear immediate-transfer consent, but the caller separately authorized this callback. Follow the caller's actual requested timing.",
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback converted misfired live transfer into interested callback", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callbackTime,
-    });
-    return true;
-  }
 
   if (shouldTreatAsTargetReachedSelfHandlingDisconnect(conversation, expectedFirstName)) {
     const outcome = buildVoiceResponseStatus("agent_reached_self_handling_disconnected");
@@ -3286,54 +3117,6 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (conversation.status === "failed" && hasLiveTransferRequest(conversation) && getExplicitCallbackConsent(conversation)) {
-    const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
-    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
-
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "callback_requested",
-      responseStatus: outcome,
-      leadStatusCode: "Y",
-      callbackRequested: "yes",
-      callbackTime,
-      liveTransferRequested: "yes",
-      voiceNotes: buildPerformanceNotes(outcome),
-    });
-
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      action: "Call this lead at the explicitly requested time",
-      callbackTime,
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details:
-        "The transfer did not complete. Actual caller words separately authorized a callback; use the requested timing shown above.",
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback converted failed live transfer into callback follow-up", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      status: conversation.status,
-    });
-    return true;
-  }
 
   const failedVoicemailOrNoAnswer = conversation.status === "failed"
     ? getVoicemailOrNoAnswerCallResult(conversation, metadata.callAttemptNumber)
@@ -3480,55 +3263,6 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (shouldTreatAsCallback(conversation)) {
-    const callbackTime = getExplicitCallbackConsent(conversation)?.callbackTime ??
-      (isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified"));
-    const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
-    const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
-
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "callback_requested",
-      responseStatus: outcome,
-      leadStatusCode: handoffReady ? "G" : "Y",
-      callbackRequested: "yes",
-      callbackTime,
-      voiceNotes: buildPerformanceNotes(outcome),
-    });
-
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      action: "Call this lead back at the requested time",
-      callbackTime,
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details: "Post-call fallback detected a callback request from the ElevenLabs transcript.",
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback sent callback email", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callbackTime,
-      handoffReady,
-    });
-    return true;
-  }
 
   if (shouldTreatAsNotInterested(conversation)) {
     const outcome = buildVoiceResponseStatus("answered_not_interested");
@@ -3708,7 +3442,7 @@ export async function handleElevenLabsPostCallWebhook(conversationId: string): P
 
 export async function processPostCallOutcomeFromConversationId(
   conversationId: string,
-  options: Pick<PostCallOptions, "postSheetUpdate"> & { requestQueueRefill?: typeof requestVoiceQueueRefill } = {},
+  options: Pick<PostCallOptions, "postSheetUpdate" | "callbackAlerts"> & { requestQueueRefill?: typeof requestVoiceQueueRefill } = {},
 ): Promise<boolean> {
   const conversation = await fetchConversation(conversationId);
   const metadata = metadataFromConversation(conversation);

@@ -29,10 +29,12 @@ import {
 } from "../lib/elevenLabsRequestResponse";
 import { logger } from "../lib/logger";
 import { requestInfoEmailApproval } from "../lib/requestInfoEmailApproval";
-import { sendCallbackEmail } from "../lib/sendCallbackEmail";
+import { voiceCallbackAlerts } from "../lib/voiceCallbackAlerts";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
 import { createElevenLabsTerminalRouter } from "./elevenLabsTerminal";
 
+export function createElevenLabsRouter(options: { enqueueCallbackAlert?: typeof voiceCallbackAlerts.enqueue;
+  postCallbackSheetUpdate?: typeof postSheetUpdate } = {}) {
 const router = Router();
 router.use("/conversation-control", createElevenLabsTerminalRouter(config.elevenLabs.toolSecret));
 
@@ -470,6 +472,11 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
         callAttemptNumber: payload.callAttemptNumber,
       });
 
+    if (!conversationId) throw new ElevenLabsValidationError("Callback call identity is unavailable; request capture is unconfirmed", 409);
+    await (options.enqueueCallbackAlert ?? voiceCallbackAlerts.enqueue)({ conversationId, rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber, agentName: payload.agentName, phone: payload.phone,
+      listingAddress: payload.listingAddress });
+
     queueElevenLabsBackgroundTask(
       "ElevenLabs callback sheet update",
       {
@@ -479,7 +486,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
         callbackTime: payload.callbackTime,
       },
       () =>
-        postSheetUpdate({
+        (options.postCallbackSheetUpdate ?? postSheetUpdate)({
           rowNumber: payload.rowNumber,
           callAttemptNumber: payload.callAttemptNumber,
           callResult: "callback_requested",
@@ -491,33 +498,9 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
         }),
     );
 
-    if (conversationId) {
-      logger.info("ElevenLabs callback email deferred until post-call transcript is available", {
-        rowNumber: payload.rowNumber,
-        agentName: payload.agentName,
-        callbackTime: payload.callbackTime,
-        conversationId,
-      });
-    } else {
-      queueElevenLabsBackgroundTask(
-        "ElevenLabs callback email",
-        {
-          rowNumber: payload.rowNumber,
-          agentName: payload.agentName,
-          callbackTime: payload.callbackTime,
-        },
-        () =>
-          sendCallbackEmail({
-            agentName: payload.agentName,
-            phone: payload.phone,
-            email: payload.email,
-            listingAddress: payload.listingAddress,
-            rowNumber: payload.rowNumber,
-            callbackTime: payload.callbackTime,
-            conversationDescription: payload.conversationSummary,
-          }),
-      );
-    }
+    logger.info("Callback owner alert durably queued for final caller-consent verification", {
+      rowNumber: payload.rowNumber, conversationId,
+    });
 
     logger.info("ElevenLabs callback requested tool handled", {
       rowNumber: payload.rowNumber,
@@ -696,4 +679,7 @@ router.post("/post-call", async (req: Request, res: Response) => {
   res.status(200).json({ ok: true });
 });
 
-export default router;
+return router;
+}
+
+export default createElevenLabsRouter();

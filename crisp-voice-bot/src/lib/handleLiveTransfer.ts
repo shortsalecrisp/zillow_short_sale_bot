@@ -4,7 +4,7 @@ import { buildLiveTransferAnnouncement } from "./ownerCallAnnouncement";
 import { resolveLiveTransferOwnerContext } from "./ownerCallContext";
 import { clearTransfer, getPendingTransfer, setYoniCallControlId } from "./liveTransferStore";
 import { logger } from "./logger";
-import { sendCallbackEmail } from "./sendCallbackEmail";
+import { sendLegacyTelnyxCallbackEmail } from "./sendCallbackEmail";
 import { postSheetUpdate } from "./sheetUpdateClient";
 import { bridgeCalls, hangupCall, placeLiveTransferApprovalCall, speakText } from "./telnyx";
 import { waitForLiveTransferReply } from "./waitForLiveTransferReply";
@@ -72,7 +72,7 @@ async function sendFallbackCallback({
 
   void postSheetUpdate(sheetUpdate)
     .then(() =>
-      sendCallbackEmail({
+      sendLegacyTelnyxCallbackEmail({
         agentName,
         phone,
         listingAddress,
