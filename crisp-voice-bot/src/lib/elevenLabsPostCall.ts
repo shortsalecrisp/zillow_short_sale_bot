@@ -308,6 +308,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Not a short sale";
   }
 
+  if (callResult === "wrong_contact") {
+    return "Wrong contact for listing";
+  }
+
   if (callResult === "voicemail_left") {
     return "Left Vm";
   }
@@ -1265,8 +1269,15 @@ function confirmedListingWithExplicitServiceDecline(conversation: ElevenLabsConv
 }
 
 export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
+  const messages = conversation.transcript ?? [];
+  const directPoliteRefusal = messages.some((item, index) =>
+    item.role === "user" &&
+    /^no[, ]+(?:thanks|thank you)[.!? ]*$/i.test((item.message ?? "").trim()) &&
+    messages.slice(0, index).some((prior) =>
+      (prior.role === "assistant" || prior.role === "agent") &&
+      typeof prior.message === "string" && hasMeaningfulSpokenContent(prior.message)));
   if (
-    shouldTreatAsRecordingArtifact(conversation) ||
+    (shouldTreatAsRecordingArtifact(conversation) && !directPoliteRefusal) ||
     shouldTreatAsDoNotCall(conversation) ||
     shouldTreatAsCallEndedByRequest(conversation) ||
     shouldTreatAsDeferredContact(conversation) ||
@@ -1276,7 +1287,6 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
   }
 
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
-  const messages = conversation.transcript ?? [];
   const liveMessages = new Set(liveContactMessages(conversation));
   const contextualServiceDecline = messages.some((item, index) => {
     if ((item.role !== "assistant" && item.role !== "agent") || !item.message) return false;
@@ -1353,6 +1363,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
     confirmedListingWithExplicitServiceDecline(conversation) ||
     directServiceRefusal ||
+    directPoliteRefusal ||
     declinedServiceAfterIdentityClarification(conversation) ||
     contextualServiceDecline ||
     completedHelpDecline ||
@@ -1370,6 +1381,29 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     text.includes("already got someone handling") ||
     text.includes("already got it handled")
   );
+}
+
+export function shouldTreatAsWrongListingContact(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsVoicemail(conversation)) return false;
+  const messages = conversation.transcript ?? [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const item = messages[index];
+    if ((item.role !== "assistant" && item.role !== "agent") ||
+        !/\bis\b.{1,140}\byour listing\?/i.test(item.message ?? "")) continue;
+    const answerIndex = messages.slice(index + 1).findIndex((next) =>
+      next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
+    if (answerIndex < 0) continue;
+    const absoluteAnswerIndex = index + 1 + answerIndex;
+    const answer = normalizeText(messages[absoluteAnswerIndex].message ?? "")
+      .replace(/[.!?]+/g, " ").replace(/\s+/g, " ").trim();
+    if (!/^(?:no|nope|not mine|not ours|that is not mine|that's not mine)$/.test(answer)) continue;
+    const acknowledgment = messages.slice(absoluteAnswerIndex + 1).find((next) =>
+      (next.role === "assistant" || next.role === "agent") &&
+      typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
+    if (acknowledgment?.message &&
+        /\b(?:wrong contact|thanks for correcting me|not your listing)\b/i.test(acknowledgment.message)) return true;
+  }
+  return false;
 }
 
 export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
@@ -1486,6 +1520,7 @@ export type AuthoritativeTerminalCallResult =
   | "gatekeeper_admin_early_exit"
   | "apparent_human_early_exit"
   | "agent_not_available"
+  | "wrong_contact"
   | "call_end_requested"
   | "answered_not_interested";
 
@@ -1521,6 +1556,7 @@ export function getAuthoritativeTerminalCallResult(
   // the recording (for example "stay on the line" or "try to connect you").
   if (shouldTreatAsRecordingArtifact(conversation)) return "agent_not_available";
   if (shouldTreatAsNotInterested(conversation)) return "answered_not_interested";
+  if (shouldTreatAsWrongListingContact(conversation)) return "wrong_contact";
   // A real affirmative answer to the needs question is stronger than a later
   // silence/no-response fallback. Let the contact-outcome path preserve it as
   // interested follow-up without inventing callback or transfer consent.
@@ -2489,7 +2525,7 @@ async function processPostCallOutcomeForConversationUnlocked(
       : {
           callResult: terminalCallResult,
           responseStatus: outcome,
-          ...(["answered_not_interested", "identity_mismatch_voicemail"].includes(terminalCallResult)
+          ...(["answered_not_interested", "identity_mismatch_voicemail", "wrong_contact"].includes(terminalCallResult)
             ? { leadStatusCode: "R" } : {}),
           ...(automatedMessageTaker ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "apparent_human_early_exit" ? { leadStatusCode: "N" } : {}),
