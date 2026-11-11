@@ -70,12 +70,16 @@ def identity(row):
     return (row[0].strip().lower(), row[1].strip().lower(), digits(row[2]), row[4].strip().lower())
 
 
-def capture(token, sid, frozen=()):
+def capture(token, sid, frozen=(), carried_rows=()):
     meta = sheets.sheets_request(token, 'GET', f'{sid}?fields=sheets.properties')
     sizes = {s['properties']['title']: s['properties']['gridProperties']['rowCount'] for s in meta['sheets']}
     main = grid_read(token, sid, 'Sheet1', sizes['Sheet1'], 'G')
     meaningful_rows = meaningful(main)
     selected = set(list(meaningful_rows)[-200:])
+    for n in carried_rows:
+        if n not in meaningful_rows:
+            raise ValueError('carried_identity_requires_reresolution:' + str(n))
+        selected.add(n)
     resolved = []
     for old in frozen:
         matches = [n for n, row in meaningful_rows.items() if identity(row) == tuple(old['identity'])]
@@ -140,11 +144,18 @@ def capture(token, sid, frozen=()):
                 outbox[n-1][indices.index(native)] = row[j] if j < len(row) else ''
     queue = grid_read(token, sid, 'Initial SMS Queue', sizes['Initial SMS Queue'], 'I')
     carried = set()
+    historical = []
     for entry in outbox[1:]:
         if entry and entry[0] in ACTIVE and re.fullmatch(r'(?:scheduler-|render-)?initial-\d+-.+', str(entry[2])):
             matches = [n for n, row in meaningful_rows.items() if digits(row[2]) == digits(entry[3])]
             if len(matches) == 1:
-                carried.add(matches[0])
+                if matches[0] in selected:
+                    carried.add(matches[0])
+                else:
+                    # Inventory old uncertain history separately. It is not
+                    # standing authorization to sweep historical outreach.
+                    historical.append({'row': matches[0], 'request_id': entry[1],
+                                       'phone': entry[3], 'status': entry[0]})
     for entry in queue[1:]:
         if len(entry) > 4 and entry[4] in ACTIVE:
             payload = json.loads(entry[3])
@@ -166,7 +177,8 @@ def capture(token, sid, frozen=()):
     if main[0][:7] != final_ids[0][:7] or any(main[n][:7] != final_ids[n][:7] for n in range(1, len(main))):
         raise ValueError('identities_changed_retry_final_capture')
     snapshot = {'observed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-                'capture_mode': 'cohort_sparse_v1', 'carried_rows': sorted(carried), 'tables': {}}
+                'capture_mode': 'cohort_sparse_v1', 'carried_rows': sorted(carried | set(carried_rows)),
+                'historical_open_initials': historical, 'tables': {}}
     for tab, values in [('Sheet1', main), ('sms_pending_sends', outbox), ('Initial SMS Queue', queue)]:
         snapshot['tables'][tab] = dict(start_row=1, end_row=sizes[tab], grid_rows=sizes[tab], truncated=False, values=values)
     snapshot['tables']['Sheet1']['detail_rows'] = selected
@@ -241,6 +253,7 @@ def terminal(initial, snapshot, resolutions=None):
     audit['execution_closeout'] = closed
     return {'contract': VERSION, 'observed_at': snapshot['observed_at'], 'audit': audit,
             'execution_ledger': execution, 'late_rows': additions,
+            'historical_open_initials': snapshot.get('historical_open_initials', []),
             'complete': closed['complete'], 'sms_open_rows': audit['sms_review_rows'],
             'terminal_gate_executed': True, 'outreach_calls': 0}
 
@@ -266,7 +279,7 @@ def handle(token, sid, payload):
                 raise ValueError('invalid_run_kind')
             if initial:
                 return {'ok': True, 'duplicate': True, 'initial': initial}
-            snap, _ = capture(token, sid)
+            snap, _ = capture(token, sid, carried_rows=payload.get('carried_rows', []))
             audit = evaluate(snap, carried_rows=snap.get('carried_rows', []))
             live = meaningful(snap['tables']['Sheet1']['values'])
             initial = {'observed_at': snap['observed_at'], 'automation_id': automation,

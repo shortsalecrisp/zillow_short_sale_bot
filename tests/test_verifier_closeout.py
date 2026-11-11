@@ -102,9 +102,9 @@ def test_journal_digest_and_chunks_have_saved_readback():
         with pytest.raises(Exception): gate.journal_read('token','sheet','run-identifier','initial')
 
 
-def native_api(late_during_capture=False):
+def native_api(late_during_capture=False, supplied_tables=None):
     s = snapshot(late=True)
-    tables = {name:table['values'] for name,table in s['tables'].items()}
+    tables = supplied_tables or {name:table['values'] for name,table in s['tables'].items()}
     calls = []
     def api(token, method, path, payload=None):
         assert method == 'GET'  # Capture must never write or send.
@@ -144,3 +144,24 @@ def test_addition_during_capture_fails_seal_and_requires_fresh_retry():
     with mock.patch.object(gate.sheets,'sheets_request',side_effect=native_api(True)):
         with pytest.raises(ValueError, match='identities_changed_retry_final_capture'):
             gate.capture('token','sheet')
+
+
+def test_old_uncertainty_is_visible_but_only_explicit_carried_rows_join_current_cohort():
+    s = snapshot()
+    main = [s['tables']['Sheet1']['values'][0]]
+    out = [s['tables']['sms_pending_sends']['values'][0]]
+    for n in range(2,205):
+        row = copy.deepcopy(s['tables']['Sheet1']['values'][1])
+        row[0],row[2],row[4],row[27] = 'Agent'+str(n),'202555'+str(1000+n),'Street '+str(n),'id'+str(n)
+        main.append(row)
+        out.append(['uncertain' if n==2 else 'sent',f'render-initial-{n}-abc',f'initial-{n}-abc',
+                    row[2],'initial text',s['observed_at'] if n!=2 else '',n])
+    tables = {'Sheet1':main,'sms_pending_sends':out,
+              'Initial SMS Queue':s['tables']['Initial SMS Queue']['values']}
+    with mock.patch.object(gate.sheets,'sheets_request',side_effect=native_api(supplied_tables=tables)):
+        fresh,_ = gate.capture('token','sheet')
+        carried,_ = gate.capture('token','sheet',carried_rows=[2])
+    assert 2 not in fresh['tables']['Sheet1']['detail_rows']
+    assert fresh['historical_open_initials'][0]['row'] == 2
+    assert 2 in carried['tables']['Sheet1']['detail_rows']
+    assert gate.evaluate(carried,carried_rows=carried['carried_rows'])['sms_review_rows'] == [2]
