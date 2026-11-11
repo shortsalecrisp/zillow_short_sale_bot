@@ -2,7 +2,7 @@ import { createHmac, createPublicKey, timingSafeEqual, verify } from "node:crypt
 
 export const RETURN_CALL_NUMBER = "+12176341017";
 export const RETURN_CALL_OFFICE = "+14043009526";
-export const RETURN_CALL_ANNOUNCEMENT = "Crisp return call. Agent name and property could not be identified. Press 1 to connect.";
+export const RETURN_CALL_ANNOUNCEMENT = "Agent name and row unavailable. Press 1 to connect.";
 export type ReturnCallStage = "screen" | "accept" | "dial-result" | "recorded" | "record-done" | "playback";
 
 export function xmlEscape(value: string): string {

@@ -1,6 +1,7 @@
 export type OwnerCallContext = {
   status: "matched" | "multiple_listings" | "ambiguous" | "unknown" | "unavailable";
   agentName?: string;
+  agentFirstName?: string;
   listingAddress?: string;
   rowNumber?: number;
 };
@@ -10,18 +11,18 @@ export function cleanAnnouncementText(value: unknown): string {
 }
 
 export function buildReturnCallAnnouncement(context: OwnerCallContext): string {
-  const name = cleanAnnouncementText(context.agentName);
-  const listing = cleanAnnouncementText(context.listingAddress);
-  if (context.status === "matched" && name && listing) {
-    return `Crisp return call. Caller number matches agent ${name}. Listing: ${listing}. Press 1 to connect.`;
+  const name = cleanAnnouncementText(context.agentFirstName ?? cleanAnnouncementText(context.agentName).split(" ")[0]);
+  if (context.status === "matched") {
+    const row = Number.isSafeInteger(context.rowNumber) && context.rowNumber! >= 2 ? `Row ${context.rowNumber}.` : "Row unavailable.";
+    return `${name || "Agent name unavailable"}. ${row} Press 1 to connect.`;
   }
-  if (context.status === "multiple_listings" && name) {
-    return `Crisp return call. Caller number matches agent ${name}. Multiple listings on file; property not confirmed. Press 1 to connect.`;
+  if (context.status === "multiple_listings") {
+    return `${name ? `${name}. ` : ""}Multiple matching rows. Press 1 to connect.`;
   }
   if (context.status === "ambiguous") {
-    return "Crisp return call. Multiple agent records match this number; caller and property not confirmed. Press 1 to connect.";
+    return "Multiple agents match. Row not confirmed. Press 1 to connect.";
   }
-  return "Crisp return call. Agent name and property could not be identified. Press 1 to connect.";
+  return "Agent name and row unavailable. Press 1 to connect.";
 }
 
 export function buildLiveTransferAnnouncement(context: Pick<OwnerCallContext, "agentName" | "listingAddress">): string {

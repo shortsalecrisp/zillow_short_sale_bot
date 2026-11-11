@@ -49,7 +49,7 @@ test("office screening is private, requires keypad acceptance, and hangs up on t
   const f = fixture();
   await handleReturnCall("incoming", parent, incoming, url, f.deps);
   const xml = await handleReturnCall("screen", parent, screened, url, f.deps);
-  assert.match(xml, /Crisp return call\. Agent name and property could not be identified\. Press 1 to connect\./);
+  assert.match(xml, /Agent name and row unavailable\. Press 1 to connect\./);
   assert.match(xml, /<\/Gather><Hangup\/>/);
   assert.doesNotMatch(xml, /<Record /);
   assert.equal(f.get()?.officeCallSid, child);
@@ -70,19 +70,20 @@ test("only press1 accepts; silence, wrong key and office voicemail do not bridge
   assert.ok(f.get()?.voicemailStartedAt);
 });
 
-test("private screen uses the stored caller number and freezes full matched context across retries", async () => {
+test("private screen uses the stored caller number and freezes the first-name/row announcement across retries", async () => {
   const { handleReturnCall } = await import("../src/routes/returnCalls");
   const f = fixture();
   let lookups = 0;
   f.deps.lookupCallerContext = async (phone) => {
     lookups += 1;
     assert.equal(phone, caller);
-    return { status: "matched", agentName: "Loretta Butler", listingAddress: "7123 CAPELLA CIR, San Antonio, TX", rowNumber: 4705 };
+    return { status: "matched", agentName: "Loretta Butler", agentFirstName: "Loretta", listingAddress: "7123 CAPELLA CIR, San Antonio, TX", rowNumber: 4705 };
   };
   const publicXml = await handleReturnCall("incoming", parent, incoming, url, f.deps);
   assert.doesNotMatch(publicXml, /Loretta|CAPELLA|San Antonio/);
   const privateXml = await handleReturnCall("screen", parent, { ...screened, From: "+12175559999" }, url, f.deps);
-  assert.match(privateXml, /agent Loretta Butler\. Listing: 7123 CAPELLA CIR, San Antonio, TX\. Press 1/);
+  assert.match(privateXml, /Loretta\. Row 4705\. Press 1 to connect\./);
+  assert.doesNotMatch(privateXml, /Butler|CAPELLA|San Antonio|Listing:/);
   assert.match(privateXml, /<Gather[^>]*><Say>/);
   const retryXml = await handleReturnCall("screen", parent, screened, url, f.deps);
   assert.equal(retryXml, privateXml);
@@ -95,10 +96,10 @@ test("failed identity lookup preserves office acceptance and public voicemail wi
   const f = fixture();
   f.deps.lookupCallerContext = async () => { throw new Error("Sheets unavailable"); };
   await handleReturnCall("incoming", parent, incoming, url, f.deps);
-  assert.match(await handleReturnCall("screen", parent, screened, url, f.deps), /could not be identified/);
+  assert.match(await handleReturnCall("screen", parent, screened, url, f.deps), /name and row unavailable/);
   const publicXml = await handleReturnCall("dial-result", parent, { CallSid: parent }, url, f.deps);
   assert.match(publicXml, /<Record /);
-  assert.doesNotMatch(publicXml, /Caller number matches|could not be identified/);
+  assert.doesNotMatch(publicXml, /name and row unavailable|Row \d+/);
 });
 
 test("owner announcement preview requires a nonempty exact secret", async () => {

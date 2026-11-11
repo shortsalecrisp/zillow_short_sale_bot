@@ -1,14 +1,23 @@
 # Private Owner Call Announcements
 
-Owner-approved October 20, 2026: identify the agent and full listing before
-Yoni accepts return calls and live transfers. Do not change public caller
-messaging, office destination, recording rules, consent, or the TTS cohort.
+Owner-approved November 11, 2026: returned voicemail calls now announce only
+the agent's first name and exact spreadsheet row: "Brenda. Row [actual row].
+Press 1 to connect." Use the first-name column, including compound first names;
+omit the surname, address and long introduction. A unique current-phone row is
+required to announce a row number. Even duplicate records for the same listing
+remain "Multiple matching rows" rather than silently selecting one. Missing or
+unavailable context stays brief and answerable, without inventing a name or row.
+An already frozen in-progress announcement is not rewritten across a deployment.
+
+This supersedes only the return-call announcement content approved October 20.
+Live transfers still identify the agent and full listing. Do not change public
+caller messaging, office destination, recording rules, consent, or the TTS cohort.
 
 - Return calls look up the stored inbound caller number, never the office
   leg's From field. Read only matching Sheet1 records; normalize phones,
   reread each match's phone, and retain street number, unit, city and state.
-- A unique matching record produces: "Crisp return call. Caller number
-  matches agent [full name]. Listing: [full address]. Press 1 to connect."
+- A unique matching record produces: "[first name]. Row [actual row].
+  Press 1 to connect."
   A phone match is not authenticated caller identity.
 - Multiple agents or properties sharing a number are announced as ambiguous
   rather than selecting the newest row or guessing a property. Unknown,
@@ -27,7 +36,7 @@ messaging, office destination, recording rules, consent, or the TTS cohort.
   sending mail, or changing CRM/BotState. It is operational text/XML proof,
   not acoustic or real-phone end-to-end proof.
 - Provider prompts, voices, models, tool configuration, cohort boundary,
-  windows, retry policy and concurrency are unchanged. Full-name/address
+  windows, retry policy and concurrency are unchanged. Owner announcement
   content is backend-owned and shared by both TTS arms.
 
 Verification: ownerCallAnnouncement, returnCalls, returnCallFlow and

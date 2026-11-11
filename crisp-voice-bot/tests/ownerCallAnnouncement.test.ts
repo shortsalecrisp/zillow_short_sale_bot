@@ -14,15 +14,15 @@ const row = (rowNumber = 4705, phone = "318-550-1079", address = "7123 CAPELLA C
   rowNumber, values: [first, last, phone, "", address, "San Antonio", "TX"],
 });
 
-test("both owner prompts retain full name, street number, unit, city and state", () => {
-  const context = { status: "matched" as const, agentName: "Loretta Butler", listingAddress: "7123 CAPELLA CIR, Unit 2, San Antonio, TX" };
-  assert.equal(buildReturnCallAnnouncement(context), "Crisp return call. Caller number matches agent Loretta Butler. Listing: 7123 CAPELLA CIR, Unit 2, San Antonio, TX. Press 1 to connect.");
+test("return calls announce only first name and exact row; live transfers retain their full context", () => {
+  const context = { status: "matched" as const, agentName: "Loretta Butler", agentFirstName: "Loretta", rowNumber: 4705, listingAddress: "7123 CAPELLA CIR, Unit 2, San Antonio, TX" };
+  assert.equal(buildReturnCallAnnouncement(context), "Loretta. Row 4705. Press 1 to connect.");
   assert.equal(buildLiveTransferAnnouncement(context), "Crisp live transfer from agent Loretta Butler. Listing: 7123 CAPELLA CIR, Unit 2, San Antonio, TX. Press 1 to accept.");
 });
 
 test("matching uses the exact normalized caller phone, never area code or a different current row", async () => {
   const { matchOwnerCallContext } = await import("../src/lib/ownerCallContext");
-  assert.deepEqual(matchOwnerCallContext("+13185501079", [row()]), { status: "matched", agentName: "Loretta Butler", listingAddress: "7123 CAPELLA CIR, San Antonio, TX", rowNumber: 4705 });
+  assert.deepEqual(matchOwnerCallContext("+13185501079", [row()]), { status: "matched", agentName: "Loretta Butler", agentFirstName: "Loretta", listingAddress: "7123 CAPELLA CIR, San Antonio, TX", rowNumber: 4705 });
   assert.equal(matchOwnerCallContext("+13185551000", [row()]).status, "unknown");
   assert.equal(matchOwnerCallContext("+13185501079", [row()], 4706).status, "unknown");
   assert.equal(matchOwnerCallContext("anonymous", [row()]).status, "unknown");
@@ -31,10 +31,12 @@ test("matching uses the exact normalized caller phone, never area code or a diff
 
 test("same-phone duplicate identities and multiple properties are explicit, not silently selected", async () => {
   const { matchOwnerCallContext } = await import("../src/lib/ownerCallContext");
-  assert.equal(matchOwnerCallContext("+13185501079", [row(), row(4706)]).status, "matched");
+  const duplicateRows = matchOwnerCallContext("+13185501079", [row(), row(4706)]);
+  assert.equal(duplicateRows.status, "multiple_listings");
+  assert.equal(buildReturnCallAnnouncement(duplicateRows), "Loretta. Multiple matching rows. Press 1 to connect.");
   const multiple = matchOwnerCallContext("+13185501079", [row(), row(4706, "3185501079", "88 Other St")]);
-  assert.deepEqual(multiple, { status: "multiple_listings", agentName: "Loretta Butler" });
-  assert.match(buildReturnCallAnnouncement(multiple), /Loretta Butler.*Multiple listings/);
+  assert.deepEqual(multiple, { status: "multiple_listings", agentName: "Loretta Butler", agentFirstName: "Loretta" });
+  assert.match(buildReturnCallAnnouncement(multiple), /Loretta.*Multiple matching rows/);
   assert.doesNotMatch(buildReturnCallAnnouncement(multiple), /CAPELLA|Other St/);
   const ambiguous = matchOwnerCallContext("+13185501079", [row(), row(4706, "3185501079", "88 Other St", "Another", "Agent")]);
   assert.equal(ambiguous.status, "ambiguous");
@@ -42,10 +44,11 @@ test("same-phone duplicate identities and multiple properties are explicit, not 
 });
 
 test("private XML escapes CRM text and never interprets it as call instructions", () => {
-  const text = buildReturnCallAnnouncement({ status: "matched", agentName: "Anne & Joe", listingAddress: "12 <Dial> Street, City, FL" });
+  const text = buildReturnCallAnnouncement({ status: "matched", agentName: "Anne & Joe", agentFirstName: "Anne & Joe <Dial>", rowNumber: 6712, listingAddress: "12 <Dial> Street, City, FL" });
   const xml = screenOfficeXml(() => "https://voice.example.com/accept", text);
   assert.match(xml, /Anne &amp; Joe/);
-  assert.match(xml, /12 &lt;Dial&gt; Street, City, FL/);
+  assert.match(xml, /Anne &amp; Joe &lt;Dial&gt;\. Row 6712/);
+  assert.doesNotMatch(xml, /Street|City|FL/);
   assert.doesNotMatch(xml, /<Dial>/);
   assert.match(xml, /<\/Say><\/Gather><Hangup\/>/);
 });
@@ -58,7 +61,17 @@ test("lookup failures and invalid caller IDs fail soft without using another age
   assert.equal(reads, 0);
   assert.equal((await lookupOwnerCallContext("+13185501079", 4705, read)).status, "unavailable");
   assert.equal(reads, 1);
-  assert.match(buildReturnCallAnnouncement({ status: "unavailable" }), /could not be identified/);
+  assert.match(buildReturnCallAnnouncement({ status: "unavailable" }), /name and row unavailable/);
+});
+
+test("first-name column is preserved and missing or invalid rows are never invented", async () => {
+  const { matchOwnerCallContext } = await import("../src/lib/ownerCallContext");
+  const context = matchOwnerCallContext("+13185501079", [row(6712, "3185501079", "88 Other St", "Mary Ann", "Smith")]);
+  assert.equal(buildReturnCallAnnouncement(context), "Mary Ann. Row 6712. Press 1 to connect.");
+  for (const rowNumber of [undefined, 0, 1, 6712.5, NaN]) {
+    assert.equal(buildReturnCallAnnouncement({ status: "matched", agentFirstName: "Brenda", rowNumber }), "Brenda. Row unavailable. Press 1 to connect.");
+  }
+  assert.equal(buildReturnCallAnnouncement({ status: "matched", agentFirstName: "", agentName: "Smith", rowNumber: 6712 }), "Agent name unavailable. Row 6712. Press 1 to connect.");
 });
 
 test("live approval enriches a shortened bot payload only from its exact current row and phone", async () => {

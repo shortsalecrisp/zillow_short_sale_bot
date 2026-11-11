@@ -14,6 +14,7 @@ export function matchOwnerCallContext(phone: string, rows: OwnerCallRow[], rowNu
     normalizePhoneToE164(row.values[2]) === normalizedPhone).map((row) => ({
       rowNumber: row.rowNumber,
       agentName: [normalizeString(row.values[0]), normalizeString(row.values[1])].filter(Boolean).join(" "),
+      agentFirstName: normalizeString(row.values[0]),
       listingAddress: buildVoiceBotListingAddress(row.values),
     }));
   if (!matches.length) return { status: "unknown" };
@@ -23,7 +24,8 @@ export function matchOwnerCallContext(phone: string, rows: OwnerCallRow[], rowNu
     return { status: "unknown" };
   }
   const listings = new Set(matches.map((row) => row.listingAddress.toLowerCase()));
-  if (listings.size !== 1) return { status: "multiple_listings", agentName: matches[0]!.agentName };
+  if (listings.size !== 1 || matches.length !== 1) return { status: "multiple_listings", agentName: matches[0]!.agentName,
+    agentFirstName: new Set(matches.map(row => row.agentFirstName.toLowerCase())).size === 1 ? matches[0]!.agentFirstName : "" };
   return { status: "matched", ...matches[0]! };
 }
 
