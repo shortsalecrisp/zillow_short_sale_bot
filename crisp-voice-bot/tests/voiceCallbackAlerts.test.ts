@@ -37,9 +37,9 @@ test("verified callback sends one complete hot-lead email, independent of transc
   await service.enqueue(identity);await service.enqueue(identity);
   assert.deepEqual(await Promise.all([service.settle(identity.conversationId),service.settle(identity.conversationId)]),['accepted','accepted']);
   await createVoiceCallbackAlertService(f.deps).recover();assert.equal(f.sent.length,1);assert.deepEqual(f.row,before);
-  const message=f.sent[0];assert.match(message.subject,/HOT LEAD - PHONE CALLBACK REQUEST/);
-  for(const field of ['Synthetic Owner','202-555-0123','123 Fictional St','Wednesday around 3','Call summary:','Caller: Please have Yoni','Playback:','sig='])assert.ok(message.text.includes(field),field);
-  assert.doesNotMatch(message.text,/Scheduled Time:|ASAP/);assert.match(message.text,/not a booked appointment/);
+  const message=f.sent[0];assert.equal(message.subject,'NEW LEAD 🔥 - SCHEDULED CALLBACK - Synthetic Owner');
+  for(const field of ['Synthetic Owner','202-555-0123','123 Fictional St','Scheduled Time: Wednesday around 3','Caller: Please have Yoni','Full Convo:','Playback:','sig='])assert.ok(message.text.includes(field),field);
+  assert.doesNotMatch(message.text,/Requested Timing:|Sheet row:|Request evidence:|Next action:|Call summary:|ASAP/);
   assert.equal(getVoiceCallbackAlertStatus().independentOfTranscriptEmailToggle,true);
 });
 test("active/pending receipts wait; callback after a missing tool is recovered by durable outbox, not another call",async()=>{
@@ -71,13 +71,17 @@ test("current-phone changes, later suppression and pending inbound block deliver
     assert.equal(f.sent.length,0);assert.deepEqual(f.row,before);
   }
   const f=fixture();f.row[19]='yes';const before=[...f.row],s=createVoiceCallbackAlertService(f.deps);await s.enqueue(identity);await s.settle(identity.conversationId);
-  assert.equal(f.sent.length,1,'owner-only notification does not place outreach or clear takeover');assert.deepEqual(f.row,before);assert.match(f.sent[0].text,/Human takeover is active and unchanged/);
+  assert.equal(f.sent.length,1,'owner-only notification does not place outreach or clear takeover');assert.deepEqual(f.row,before);
 });
 test("source callback identity cannot be replaced and the one approved synthetic test cannot repeat",async()=>{
   const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');const f=fixture(),s=createVoiceCallbackAlertService(f.deps);await s.enqueue(identity);
   await assert.rejects(s.enqueue({...identity,phone:'+12025550999'}),/identity changed/);
   const a=await s.selfTest(),b=await createVoiceCallbackAlertService(f.deps).selfTest();assert.equal(a.status,'accepted');assert.equal(b.status,'accepted');
   assert.equal(f.sent.length,1);assert.match(f.sent[0].subject,/^\[TEST\]/);assert.match(f.sent[0].text,/NOT a real hot lead/);
+  const {buildCallbackEmailMessage}=await import('../src/lib/sendCallbackEmail');
+  const expected=buildCallbackEmailMessage({agentName:'Synthetic verification',phone:'+12025550123',listingAddress:'NOT A REAL LISTING',rowNumber:0,
+    callbackTime:'tomorrow at 3 (synthetic; not an appointment)',conversationDescription:f.sent[0].text.split('Full Convo:\n')[1]});
+  assert.equal(f.sent[0].subject,`[TEST] ${expected.subject}`);assert.equal(f.sent[0].text,expected.text);assert.equal(f.sent[0].html,expected.html);
 });
 
 test("the real post-call entry point captures a callback before positive-needs/hangup classification, even when its tool never fired",async()=>{

@@ -7,9 +7,10 @@ worker independently verifies current row/phone/attempt identity and actual call
 Post-call fallback also captures requests whose callback tool never fired, before the
 generic interest/hangup classifications can consume them.
 
-The email contains the contact, phone, listing, caller-requested timing, consent wording,
-summary, transcript and protected recording link. Timing is not a booked appointment;
-no absent AM/PM, date, zone or ASAP is invented. Caller-initiated future contact, recordings,
+The original `buildCallbackEmailMessage` template remains unchanged: original subject,
+labels, HTML/plain-text layout, contact, phone, listing, callback time, full conversation
+and protected recording link. This repair changes reliable triggering and delivery, not
+the email template. No absent AM/PM, date, zone or ASAP is invented. Caller-initiated future contact, recordings,
 revocations and information-only preferences cannot authorize a callback alert. New
 suppression or pending inbound blocks sending. Human takeover is retained; an internal
 owner notice never places outreach or changes takeover fields.
@@ -33,6 +34,9 @@ The owner-approved `/callback-alerts/self-test` uses fixed synthetic content and
 durable test identifier. It requires the configured recipient to match the approved owner
 recipient, cannot address a lead, changes no lead rows and places no calls. Do not repeat
 an uncertain response. Verify the exact Message-ID in the owner's mailbox.
+The test uses this same existing builder with synthetic values and a `[TEST]` subject
+prefix; it has no separate formatting. The previously accepted one-time test is never
+resent merely because its original formatting was corrected.
 
 The older keypad/Telnyx-only implementation remains explicitly named
 `sendLegacyTelnyxCallbackEmail`; it is not used by production Maya and is not enabled by

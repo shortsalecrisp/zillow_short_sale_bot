@@ -236,8 +236,11 @@ export function createVoiceCallbackAlertService(deps: CallbackAlertDependencies 
       validate(state, id);
       if (state.status !== "awaiting_final") return { status: state.status, messageId: state.messageId };
       const text = "This is the one owner-approved production callback-alert test. It is NOT a real hot lead. No lead row was changed, no call was placed, and no callback was scheduled.\n\nSynthetic contact: Synthetic verification\nSynthetic phone: +12025550123 (do not call)\nListing: NOT A REAL LISTING\nRequested timing example: tomorrow at 3 (caller words; not an appointment)\nRecording: not applicable, because no call was placed.\n\nReal callback alerts include the verified contact, phone, listing, caller request, requested timing, summary, transcript and protected recording link.";
-      const status = await deliver(key, state, { subject: "[TEST] HOT LEAD - PHONE CALLBACK - Synthetic verification", text,
-        html: `<p>${text.replace(/\n/g, "<br>")}</p>`, messageId: state.messageId }, async () => true);
+      const message = buildCallbackEmailMessage({ agentName: state.agentName, phone: state.phone,
+        listingAddress: state.listingAddress, rowNumber: 0, callbackTime: "tomorrow at 3 (synthetic; not an appointment)",
+        conversationDescription: text });
+      const status = await deliver(key, state, { ...message, subject: `[TEST] ${message.subject}`,
+        messageId: state.messageId }, async () => true);
       return { status, messageId: state.messageId };
     });
   }
