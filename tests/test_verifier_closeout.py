@@ -93,8 +93,11 @@ def test_partial_native_response_fails_closed():
 def test_journal_digest_and_chunks_have_saved_readback():
     rows = [gate.HEADERS]
     def append(_,__,___,values): rows.extend(values)
+    def read(_,__,specs):
+        return [[r[:7] for r in rows] if spec.endswith('A:G') else
+                [[rows[int(re.search(r'!H(\d+):',spec)[1])-1][7]]] for spec in specs]
     artifact = dict(observed_at=dt.datetime.now(dt.timezone.utc).isoformat(),values=['proof']*1000)
-    with mock.patch.object(gate,'batch_read',side_effect=lambda *_:[rows]), \
+    with mock.patch.object(gate,'batch_read',side_effect=read), \
          mock.patch.object(gate.sheets,'append_values',side_effect=append):
         gate.journal_write('token','sheet','run-identifier','lead-verifier-5-pm','initial',artifact)
         assert gate.journal_read('token','sheet','run-identifier','initial') == artifact

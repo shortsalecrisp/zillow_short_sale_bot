@@ -198,15 +198,22 @@ def capture(token, sid, frozen=(), carried_rows=()):
 
 
 def journal_read(token, sid, run_id, phase):
-    rows = batch_read(token, sid, [f"'{TAB}'!A:H"])[0]
-    matches = [r for r in rows[1:] if len(r) == 8 and r[0] == run_id and r[2] == phase]
+    # Read the small index first, then only this run's compressed artifact.
+    # Never re-download all historical snapshots to validate one receipt.
+    rows = batch_read(token, sid, [f"'{TAB}'!A:G"])[0]
+    matches = [(number, r) for number, r in enumerate(rows[1:], 2)
+               if len(r) >= 7 and r[0] == run_id and r[2] == phase]
     if not matches:
         return None
-    digest = matches[-1][4]
-    parts = [r for r in matches if r[4] == digest]
-    if len(parts) != int(parts[0][6]) or len({r[5] for r in parts}) != len(parts):
+    digest = matches[-1][1][4]
+    parts = [(number, r) for number, r in matches if r[4] == digest]
+    if len(parts) != int(parts[0][1][6]) or len({r[5] for _, r in parts}) != len(parts):
         raise ValueError('incomplete_immutable_gate_artifact')
-    data = gzip.decompress(base64.b64decode(''.join(r[7] for r in sorted(parts, key=lambda r: int(r[5])))))
+    parts.sort(key=lambda entry: int(entry[1][5]))
+    payloads = batch_read(token, sid, [f"'{TAB}'!H{number}:H{number}" for number, _ in parts])
+    if any(not block or not block[0] or not isinstance(block[0][0], str) for block in payloads):
+        raise ValueError('incomplete_immutable_gate_artifact')
+    data = gzip.decompress(base64.b64decode(''.join(block[0][0] for block in payloads)))
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError('gate_artifact_digest_mismatch')
     return json.loads(data)
