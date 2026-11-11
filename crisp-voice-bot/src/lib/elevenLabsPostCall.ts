@@ -11,11 +11,12 @@ import {
 } from "./providerCircuitBreaker";
 import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
+import { notifyMissingHandoffReview, type MissingHandoffReview } from "./voiceHandoffReviewAlert";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "./elevenLabsDoNotCall";
-import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+import { hasTerminalVoicemailManagementMenu, isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
@@ -29,6 +30,7 @@ const RETRY_DELAY_MS = 30_000;
 
 type PostCallOptions = {
   postSheetUpdate?: (payload: SheetUpdateRequest) => Promise<void>;
+  notifyHandoffReview?: typeof notifyMissingHandoffReview;
 };
 
 type ElevenLabsTranscriptItem = {
@@ -942,6 +944,32 @@ export function shouldTreatAsPositiveNeedsAnswer(conversation: ElevenLabsConvers
     /\b(?:not interested|do not need|don't need|dont need|no longer need|already (?:have|got) (?:it|that) (?:handled|covered)|no thanks|no necesito|no quiero|no estoy interesad[oa])\b/i.test(message));
 }
 
+export function getMissingHandoffReview(conversation: ElevenLabsConversation): MissingHandoffReview | undefined {
+  if (!["done", "failed"].includes(conversation.status ?? "") ||
+      !(Number(conversation.metadata?.call_duration_secs) > 0) ||
+      hasLiveTransferRequest(conversation) || hasSuccessfulTransfer(conversation) ||
+      getExplicitCallbackConsent(conversation) || shouldTreatAsDoNotCall(conversation) ||
+      shouldTreatAsDeferredContact(conversation) || shouldTreatAsCallEndedByRequest(conversation) ||
+      shouldTreatAsNotInterested(conversation) || !shouldTreatAsPositiveNeedsAnswer(conversation)) return undefined;
+  const live = new Set(liveContactMessages(conversation));
+  let offer = "", review: MissingHandoffReview | undefined;
+  for (const item of conversation.transcript ?? []) {
+    if (["agent", "assistant"].includes(item.role ?? "") && item.message?.trim()) {
+      if (/would you like me to see if yoni,? our short[- ]sale specialist/i.test(item.message)) offer = item.message;
+      continue;
+    }
+    if (item.role !== "user" || !item.message || !live.has(item.message) || !offer) continue;
+    const reply = normalizeText(item.message).replace(/[.!?]+$/g, "");
+    const complete = /\bcan join this call now\?\s*$/i.test(offer);
+    const interrupted = /specialist[, ]*\.{3}\s*$/i.test(offer);
+    if ((complete || interrupted) && /^(?:yes|yeah|sure|please do|i'd like that|i would like that|yes please)$/.test(reply)) {
+      review = { offer, reply: item.message, evidence: complete ? "explicit_live_now" : "interrupted_offer" };
+    }
+    offer = "";
+  }
+  return review;
+}
+
 function liveContactMessages(conversation: ElevenLabsConversation): string[] {
   if (
     conversation.has_user_audio === false ||
@@ -1345,6 +1373,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
 }
 
 export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
+  if (hasTerminalVoicemailManagementMenu(conversation.transcript ?? [])) return true;
   if (userMessages(conversation).some(isRecordedNoVoicemailGreeting)) {
     // A later genuine human supersedes the recording, but never erase an actual delivered message.
     if (!isRecordingOrScreeningArtifact(conversation.transcript ?? []) && !usedVoicemailDetectionTool(conversation)) return false;
@@ -1472,6 +1501,10 @@ export function getAuthoritativeTerminalCallResult(
     expected.fullName ?? "",
     expected.email ?? "",
   )) return "identity_mismatch_voicemail";
+
+  if (hasTerminalVoicemailManagementMenu(conversation.transcript ?? [])) {
+    return getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
+  }
 
   const unresolvedPhoneMenu = isRecordingOrScreeningArtifact(conversation.transcript ?? []) &&
     userMessages(conversation).some(message => /\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(message));
@@ -2493,13 +2526,18 @@ async function processPostCallOutcomeForConversationUnlocked(
       return false;
     }
     const updates = buildVoiceContactOutcomeUpdates(contactResult, conversation);
+    const handoffReview = contactResult === "interested_followup_review" ? getMissingHandoffReview(conversation) : undefined;
     const outcome = updates.responseStatus!;
     await persistVoiceContactOutcome({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       ...updates,
-      voiceNotes: buildPerformanceNotes(outcome),
+      voiceNotes: buildPerformanceNotes(outcome) + (handoffReview ? `\nCODEX_VOICE_TRANSFER_OPPORTUNITY_REVIEW_V1 ${JSON.stringify({ conversationId, ...handoffReview, callbackConsent: false, transferCompleted: false })}` : ""),
     });
+    if (handoffReview) {
+      const notification = await (options.notifyHandoffReview ?? notifyMissingHandoffReview)({ conversationId, metadata, review: handoffReview, transcript: fullTranscript });
+      logger.info("Missing live connection owner review alert reconciled", { conversationId, rowNumber: metadata.rowNumber, notification });
+    }
     await sendTranscriptEmailIfEnabled({
       conversationId, metadata, outcome, summary, transcript: fullTranscript,
     });

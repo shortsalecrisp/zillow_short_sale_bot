@@ -388,10 +388,17 @@ async function writeVoiceLeadRow(
       const reason = updates.voiceReviewedDisposition ?? "verified_final_decline";
       try {
         const target = await verifyReviewedDisposition(fresh, Number(updates.callAttemptNumber), reason, receipt);
-        if (reason === "verified_caller_goodbye") {
+        if (reason === "verified_caller_goodbye" || reason === "verified_terminal_voicemail_menu") {
           if (!updates.voiceReviewedFirstReceipt) throw new Error("Caller-goodbye reconciliation requires both exact current-phone receipts");
           const first = await getTerminalReceipt(updates.voiceReviewedFirstReceipt);
           verifyVoiceTerminalReceipt(rowNumber, fresh, 1, { ...updates.voiceTerminalReceipt, conversationId: updates.voiceReviewedFirstReceipt }, first);
+          if (reason === "verified_terminal_voicemail_menu") {
+            const classifier = await import("./elevenLabsPostCall");
+            const conversation = first as Parameters<typeof classifier.getVoiceContactRequestResult>[0];
+            if (classifier.getVoiceContactRequestResult(conversation) || classifier.getExplicitCallbackConsent(conversation)) {
+              throw new Error("Reviewed voicemail held: earlier protected live contact");
+            }
+          }
         }
         if (reason === "verified_historical_gatekeeper") {
           if (!updates.voiceReviewedSecondReceipt) throw new Error("Historical gatekeeper reconciliation requires both exact receipts");

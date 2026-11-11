@@ -7,6 +7,29 @@ import { replaceContactBindings, syncComparisonPrompts } from '../src/scripts/sy
 import { sha256 } from '../src/scripts/syncElevenLabsPromptOnly.mjs';
 import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE } from '../src/scripts/verifyElevenLabsComparison.mjs';
 import { applySharedBusinessPrompt, sharedBusinessPromptProtectedHashes } from '../src/scripts/elevenLabsSharedBusinessPrompt.mjs';
+import {applyConversationRecovery,recoveryProtectedHashes} from '../src/scripts/elevenLabsConversationRecovery.mjs';
+
+test('confirmed-state release changes only five reviewed leaves in both arms and keeps the strict prompt limit',async t=>{
+  const s=await setup(t,true);
+  const old='# Role and style\n'+s.agents[0].conversation_config.agent.prompt.prompt;
+  const next='# Role and style\n'+s.prompt;
+  for(const a of s.agents){a.conversation_config.agent.prompt.prompt=old;a.workflow={nodes:{
+    opening_listener:{conversation_config:{agent:{prompt:{prompt:old+'\n\n[CRISP_OPENING_HANDOFF_POLICY]\nProtected handoff suffix\n# Opening listener entry\nProtected recording/ending rules. A repeated hello or presence check from the same listener who already heard your identity gets only "Is {{streetAddress}} your listing?".'}}}},
+    short_listing_recovery:{conversation_config:{agent:{prompt:{prompt:'# Short listing-check recovery state\nProtected preconfirmation recovery'}}}},
+  },edges:{opening_to_short_listing_recovery:{forward_condition:{condition:'A new listener gets a listing check.'}},main_to_short_listing_recovery:{forward_condition:{condition:'A repeated hello gets a listing check.'}}}};}
+  await writeFile(s.options.promptPath,'## Prompt\n'+next);
+  s.options.branches=s.agents.map(a=>({id:a.branch_id,version:a.version_id,promptHash:sha256(old)}));
+  const before=structuredClone(s.agents[0]),after=applyConversationRecovery(before,next);
+  assert.deepEqual(recoveryProtectedHashes(after),recoveryProtectedHashes(before));
+  assert.match(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt,/already confirmed the listing/);
+  assert.match(after.workflow.nodes.short_listing_recovery.conversation_config.agent.prompt.prompt,/ONLY while listing ownership remains unconfirmed/);
+  assert.throws(()=>applyConversationRecovery(before,'# Role and style\n'+'word '.repeat(6300)),/6300/);
+  const options={...s.options,repairConversationRecovery:true};
+  await syncComparisonPrompts(options,s.fetcher);
+  const receipt=await syncComparisonPrompts({...options,apply:true},s.fetcher);
+  assert.equal(receipt.status,'live_uniform_comparison_verified');assert.deepEqual(s.writes,['branch_0','branch_1']);
+  assert.equal(s.agents[0].conversation_config.agent.prompt.prompt,next);
+});
 
 async function setup(t, bothOld = false, contact = false) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'voice-comparison-test-'));

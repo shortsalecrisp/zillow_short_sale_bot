@@ -1,6 +1,37 @@
 # Uniform Conversion Comparison
 
-Current revision is r18, verified at 2026-11-06T02:27:58.993Z (November 5 at 9:27:58 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r18.
+Current revision is r19, verified at 2026-11-11T13:59:15.603Z (November 11 at 8:59:15 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r19.
+
+## Approved Revision 19: Confirmed State And Missing Handoff
+
+Yoni approved the Janese, Tami and Glenn repairs and a monitor-only pin update. The paired
+publisher changed exactly five leaves: root policy, embedded opening policy, short-listing
+recovery policy, and the two entry conditions into short-listing recovery. After confirmed
+listing ownership, a presence check resumes only the pending question, never identity.
+The opening prefix now also carries the already-approved r18 contextual decline rule.
+Complete the one live-now offer before consent; execute the availability tool rather than
+substituting a spoken hold/connect promise. Recordings cannot authorize contact requests.
+Backend-only safeguards capture a missing-tool opportunity as owner review, not callback
+consent or a completed handoff, with a durable one-alert claim and uncertain-send holds.
+Terminal voicemail review/rerecord menus and their canned completion stay recordings;
+later substantive live speech still supersedes them. Historical corrections require fresh
+identity, both exact receipts, protected-state guards and durable owning-field readback.
+
+- Cohort: `maya_uniform_lead_conversion_20261111_r19`.
+- Boundary: `2026-11-11T13:59:15.603Z`.
+- Policy: `maya-uniform-lead-conversion-20261111-r19`.
+- Flash: `agtvrsn_9001m75efm0vf0m8d9w2rwrr0jmj`.
+- v4: `agtvrsn_8701m75efpr0eyyt42e4pfqka5xf`.
+- Root prompt (6,277 words, strictly below 6,300): `1504f87b2f36ee90e7864c88b815650c3c724fff657c035c5763700fdcdf189a`.
+- Shared normalized body: `645ee1f7c386d5a85e325bdf465536b933840ceebaee5ce22c9f03acf610e617`.
+- Workflow: `07197f78c7c423b31bfcaebcc6139fa35c10f424bd5e1104e4d9ec814058bde3`.
+
+Exact plan and final two-arm readback: `voice-three-call-repair-20261111/paired-r19/`
+under the original voice task artifact root. Voices, TTS models, gpt-4.1, turn_v3, tools,
+audio, phone/platform/WhatsApp/procedure fields, 50/50 allocation, windows and dispatch
+controls remain unchanged. No calls were placed. Audio-assisted historical review is not
+human audition or proof of future organic behavior. Preserve the r18 checkpoint of 148
+genuine calls (Flash70/v4 78) separately; it is not a true-live or conversion count.
 
 ## Approved Revision 18: Contextual Decline Closeout
 

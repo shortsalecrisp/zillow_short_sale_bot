@@ -5,7 +5,7 @@ export type TransferConsentTranscriptItem = {
 };
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
 function isAssistantRole(role?: string): boolean {
@@ -76,7 +76,7 @@ function isSimplePositiveReply(message: string): boolean {
     .trim();
 
   return (
-    /^(?:yes|yeah|yep|sure|ok|okay|sounds good|go ahead|please do|that's fine|that works|if (?:he|yoni)'?s available|if (?:he|yoni) is available|right now is fine)$/.test(text) ||
+    /^(?:yes|yeah|yep|sure|ok|okay|sounds good|go ahead|please do|i'd like that|i would like that|that's fine|that works|if (?:he|yoni)'?s available|if (?:he|yoni) is available|right now is fine)$/.test(text) ||
     /^(?:yes|yeah|yep|sure|ok|okay)\s+go ahead$/.test(text) ||
     /^(?:yes|yeah|yep|sure|ok|okay)\s+(?:please do|that's fine|that works)$/.test(text)
   );

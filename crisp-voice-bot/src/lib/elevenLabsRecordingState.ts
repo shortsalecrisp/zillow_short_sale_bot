@@ -34,6 +34,19 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
+export function hasTerminalVoicemailManagementMenu(transcript: RecordingStateTranscriptItem[]): boolean {
+  const messages = transcript.filter(item => item.role === "user" && typeof item.message === "string")
+    .map(item => normalizeText(item.message!));
+  const menu = (text: string) => /\b(?:listen to|review) (?:your |the )?message\b/.test(text) &&
+    /\b(?:erase|rerecord|re-record)\b/.test(text) && /\bpress (?:one|two|three|four|[1-4])\b/.test(text);
+  const index = messages.findIndex(menu);
+  if (index < 0) return false;
+  // Only the exact canned completion can follow the menu without establishing
+  // a human pickup. Any other substantive later speech remains authoritative.
+  return messages.slice(index + 1).every(text => !text || text === "..." || menu(text) ||
+    /^(?:sorry you(?:'re| are) having trouble[.! ]*)?your message has been sent[.! ]*(?:please try again later[.! ]*)?(?:goodbye[.! ]*)?$/.test(text));
+}
+
 export function isRecordedNoVoicemailGreeting(message: string): boolean {
   const text = normalizeText(message);
   const refusal = /\b(?:do not|don't|dont|never) leave (?:me |us )?(?:a |any )?(?:voice ?mail(?: message)?s?|messages?)\b/.test(text) ||
@@ -104,6 +117,7 @@ export function isRecordingOrScreeningArtifact(
   transcript: RecordingStateTranscriptItem[],
   summary = "",
 ): boolean {
+  if (hasTerminalVoicemailManagementMenu(transcript)) return true;
   if (isAutomatedMessageTakerConversation(transcript)) return true;
   const messages = transcript
     .filter((item) => item.role === "user" && typeof item.message === "string")

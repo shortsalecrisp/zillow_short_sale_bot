@@ -78,12 +78,13 @@ test("a question keeps the entire response answer-only even after it is answered
 test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
   const s = section("Intro only");
-  assert.match(s, /answer only those points from the answer library instead of delivering the full introduction/);
-  assert.match(s, /Do not repeat identity or purpose already answered/);
-  assert.match(s, /After screening or hold, a genuinely new live listener who has not heard your identity enters the native recovery state/);
+  assert.match(s, /For a first-turn question, answer only those points from the answer library, not the introduction/);
+  assert.match(s, /Never repeat answered identity or purpose/);
+  assert.match(s, /After screening or hold, a genuinely new listener gets/);
   assert.match(s, /Hi, \{\{assistantName\}\} with Crisp Short Sales\. Is \{\{streetAddress\}\} your listing\?/);
-  assert.match(s, /same listener who already heard your identity gets only/);
-  assert.match(s, /Do not repeat the screener response or full sales introduction/);
+  assert.match(s, /same listener's repeated hello gets only/);
+  assert.match(s, /ONLY while unconfirmed; after confirmation use the pending-question repair above/);
+  assert.match(s, /Never repeat the screener response or full sales introduction/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -113,11 +114,11 @@ test("bounded repair preserves understood fragments and never guesses consent", 
   const s = section("Listening and repair");
   assert.match(s, /retain that part and ask only for what was missing/);
   assert.match(s, /Do not repeat the full opening or guess the answer/);
-  assert.match(s, /do not keep pitching or invent consent to another channel/);
-  assert.match(s, /Honor an actual refusal, stop request or opt-out promptly/);
-  assert.match(s, /Repeated intelligible "Hello\?" after the listing-agent introduction or check is a live interruption/);
-  assert.match(s, /Never restart the introduction, repeat identity, or add another question/);
-  assert.match(s, /native recovery state says only: "Is \{\{streetAddress\}\} your listing\?"/);
+  assert.match(s, /Never invent another channel's consent/);
+  assert.match(s, /preserve refusal, stop and opt-out priority/);
+  assert.match(s, /A repeated "Hello\?" before listing confirmation gets only "Is \{\{streetAddress\}\} your listing\?"/);
+  assert.match(s, /AFTER confirmation, say "I'm here\." and repeat ONLY the unanswered question once/);
+  assert.match(s, /Never reset confirmed identity, re-pitch, or treat continued silence as consent to end/);
 });
 
 test("a confirmed listing plus a purpose question remains answer-only", () => {

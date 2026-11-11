@@ -1,7 +1,7 @@
 import { normalizeMarker, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 
-export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper";
+export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper" | "verified_terminal_voicemail_menu";
 
 export function reviewedDispositionState(row: unknown[], attempt: number, reason: ReviewedVoiceDisposition) {
   const marked = (v: unknown) => !["", "no", "false", "0"].includes(normalizeMarker(v));
@@ -29,6 +29,10 @@ export function reviewedDispositionState(row: unknown[], attempt: number, reason
   if (reason === "verified_caller_goodbye" && attempt === 2 && result === "no_response_second_attempt" && K === "N") {
     return { callResult: "call_end_requested", leadStatusCode: "" };
   }
+  if (reason === "verified_terminal_voicemail_menu" && attempt === 2 && result === "call_received_agent_hung_up" && K === "N" &&
+      parseVoiceBotDate(row[32]) && [29, 30, 31, 34].every(i => !normalizeString(row[i]))) {
+    return { callResult: "voicemail_reached_final_attempt", leadStatusCode: K };
+  }
   throw new Error("Reviewed disposition held: previous result/status does not match reviewed scope");
 }
 
@@ -36,6 +40,10 @@ export async function verifyReviewedDisposition(row: unknown[], attempt: number,
   const target = reviewedDispositionState(row, attempt, reason);
   const classifier = await import("./elevenLabsPostCall");
   const conversation = receipt as Parameters<typeof classifier.getVoiceContactRequestResult>[0];
+  if (reason === "verified_terminal_voicemail_menu") {
+    const { hasTerminalVoicemailManagementMenu } = await import("./elevenLabsRecordingState");
+    if (!hasTerminalVoicemailManagementMenu(conversation.transcript ?? [])) throw new Error("Reviewed voicemail requires an exact terminal management menu");
+  }
   const actual = reason === "verified_positive_needs"
     ? classifier.getVoiceContactRequestResult(conversation)
     : classifier.getAuthoritativeTerminalCallResult(conversation, attempt,

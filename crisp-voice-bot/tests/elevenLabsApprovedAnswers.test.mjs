@@ -66,11 +66,10 @@ test('compound negative needs answers cannot enter the self-handler pitch', () =
 test('first-person mailbox callback wording waits for recording completion, never creates live consent', () => {
   const voicemail = prompt.split('# Voicemail and recorded exits\n')[1];
   assert.ok(voicemail.includes('Sorry I missed your call. I will call you back. Thank you'));
-  assert.match(voicemail, /Do not promise to wait, acknowledge a live preference or invoke contact-request tools/);
-  assert.match(voicemail, /An ambiguous first-person greeting requires silence until it finishes/);
+  assert.match(voicemail, /Wait through ambiguous greetings; never promise to wait or invoke contact-request tools/);
   assert.match(voicemail, /review\/rerecord\/send-message menu confirms voicemail/);
-  assert.match(voicemail, /follow the attempt-specific path without waiting for live replies or repeating delivered messages/);
-  assert.match(voicemail, /A later substantive live interruption supersedes the recording/);
+  assert.match(voicemail, /Follow the attempt-specific path; its canned "message has been sent" goodbye is not human contact or substantive-message proof/);
+  assert.match(voicemail, /A later actual live question, callback, opt-out or takeover supersedes recordings/);
   assert.ok(voicemail.includes("Sorry I missed your call--what's this about?"));
 });
 
