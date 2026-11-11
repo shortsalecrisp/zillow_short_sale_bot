@@ -36,7 +36,7 @@ def snapshot(late=False):
 def initial(s):
     audit = gate.evaluate(s)
     live = gate.meaningful(s['tables']['Sheet1']['values'])
-    return dict(audit=audit,frozen=[dict(row=r['row'],identity=list(gate.identity(live[r['row']]))) for r in audit['ledger']])
+    return dict(audit=audit,frozen=[dict(row=r['row'],stable_id=r['stable_id'],identity=list(gate.identity(live[r['row']]))) for r in audit['ledger']])
 
 
 def test_brennan_added_after_begin_cannot_be_omitted_from_final_gate():
@@ -178,3 +178,17 @@ def test_native_read_retries_quota_without_replaying_any_write():
         assert gate.native_get('token','sheet') == {'valueRanges':[]}
     assert all(call.args[1]=='GET' for call in api.call_args_list)
     sleep.assert_called_once_with(5)
+
+
+def test_phone_correction_needs_same_listing_identity_and_own_sent_receipt():
+    s = snapshot(); first = initial(s)
+    s['tables']['Sheet1']['values'][1][2] = '303-555-0100'
+    assert not gate.terminal(first,s)['complete']
+    out = s['tables']['sms_pending_sends']
+    out['values'].append(['sent','render-initial-2-new','initial-2-new','3035550100','initial text',s['observed_at'],2])
+    out['end_row'] = out['grid_rows'] = 3
+    result = gate.terminal(first,s)
+    assert result['complete'] and result['corrected_phone_episodes'][0]['row'] == 2
+    s['tables']['Sheet1']['values'][1][27] = 'other-listing'
+    with pytest.raises(ValueError,match='corrected_phone_listing_identity_mismatch'):
+        gate.terminal(first,s)

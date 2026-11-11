@@ -82,6 +82,23 @@ def identity(row):
     return (row[0].strip().lower(), row[1].strip().lower(), digits(row[2]), row[4].strip().lower())
 
 
+def frozen_owner(live, old, full_rows=None):
+    key = tuple(old['identity'])
+    exact = [n for n, row in live.items() if identity(row) == key]
+    if len(exact) == 1:
+        return exact[0]
+    # A verified phone correction creates a new phone episode for the same
+    # immutable listing/person. Old-phone receipts never prove that new send.
+    candidates = [n for n, row in live.items()
+                  if (identity(row)[0], identity(row)[1], identity(row)[3]) == (key[0],key[1],key[3])]
+    if len(candidates) != 1 or not old.get('stable_id'):
+        raise ValueError('frozen_identity_missing_or_ambiguous:' + str(old['row']))
+    n = candidates[0]
+    if full_rows is not None and str(full_rows[n-1][27] or '') != str(old['stable_id']):
+        raise ValueError('corrected_phone_listing_identity_mismatch')
+    return n
+
+
 def capture(token, sid, frozen=(), carried_rows=()):
     meta = native_get(token, f'{sid}?fields=sheets.properties')
     sizes = {s['properties']['title']: s['properties']['gridProperties']['rowCount'] for s in meta['sheets']}
@@ -94,11 +111,9 @@ def capture(token, sid, frozen=(), carried_rows=()):
         selected.add(n)
     resolved = []
     for old in frozen:
-        matches = [n for n, row in meaningful_rows.items() if identity(row) == tuple(old['identity'])]
-        if len(matches) != 1:
-            raise ValueError('frozen_identity_missing_or_ambiguous:' + str(old['row']))
-        selected.add(matches[0])
-        resolved.append({**old, 'row': matches[0]})
+        n = frozen_owner(meaningful_rows, old)
+        selected.add(n)
+        resolved.append({**old, 'row': n})
     header = batch_read(token, sid, ["'Sheet1'!A1:AQ1"])[0]
     if not header:
         raise ValueError('missing_sheet_header')
@@ -184,6 +199,8 @@ def capture(token, sid, frozen=(), carried_rows=()):
             raise ValueError('carried_identity_changed_during_capture')
         main[n-1] = row + [''] * (42-len(row)) + [aq[0][0] if aq and aq[0] else '']
     selected = sorted(set(selected) | carried)
+    for old in frozen:
+        frozen_owner(meaningful_rows, old, main)
     # Seal against a lead arriving or changing while the capture was in progress.
     final_ids = grid_read(token, sid, 'Sheet1', sizes['Sheet1'], 'G')
     if main[0][:7] != final_ids[0][:7] or any(main[n][:7] != final_ids[n][:7] for n in range(1, len(main))):
@@ -237,16 +254,16 @@ def terminal(initial, snapshot, resolutions=None):
     frozen = initial['frozen']
     live = meaningful(snapshot['tables']['Sheet1']['values'])
     mapped = []
+    phone_changes = []
     for entry in frozen:
-        matches = [n for n, row in live.items() if identity(row) == tuple(entry['identity'])]
-        if len(matches) != 1:
-            raise ValueError('frozen_identity_missing_or_ambiguous')
-        mapped.append(matches[0])
+        n = frozen_owner(live, entry, snapshot['tables']['Sheet1']['values'])
+        mapped.append(n)
+        if digits(live[n][2]) != entry['identity'][2]:
+            phone_changes.append({'row':n,'old_phone':entry['identity'][2],'current_phone':digits(live[n][2])})
     audit = evaluate(snapshot, carried_rows=set(mapped) | set(snapshot.get('carried_rows', [])))
     first = {'ledger': [{**r, 'row': n} for r, n in zip(initial['audit']['ledger'], mapped)]}
     # Freeze order is audit ledger order, not Sheet row order.
-    old_keys = {tuple(r['identity']) for r in frozen}
-    additions = [n for n, row in live.items() if n in snapshot['tables']['Sheet1']['detail_rows'] and identity(row) not in old_keys]
+    additions = [n for n in live if n in snapshot['tables']['Sheet1']['detail_rows'] and n not in mapped]
     items = []
     for row in audit['ledger']:
         disposition = row['sms_disposition']
@@ -272,6 +289,7 @@ def terminal(initial, snapshot, resolutions=None):
     audit['execution_closeout'] = closed
     return {'contract': VERSION, 'observed_at': snapshot['observed_at'], 'audit': audit,
             'execution_ledger': execution, 'late_rows': additions,
+            'corrected_phone_episodes': phone_changes,
             'historical_open_initials': snapshot.get('historical_open_initials', []),
             'complete': closed['complete'], 'sms_open_rows': audit['sms_review_rows'],
             'terminal_gate_executed': True, 'outreach_calls': 0}
@@ -305,7 +323,8 @@ def handle(token, sid, payload):
                        'run_kind': payload.get('run_kind', 'organic_scheduled'),
                        'run_receipt_id': run_id, 'audit': audit,
                        'snapshot': snap,
-                       'frozen': [{'row': r['row'], 'identity': list(identity(live[r['row']]))} for r in audit['ledger']]}
+                       'frozen': [{'row': r['row'], 'stable_id':r['stable_id'],
+                                   'identity': list(identity(live[r['row']]))} for r in audit['ledger']]}
             journal_write(token, sid, run_id, automation, 'initial', initial)
             return {'ok': True, 'initial': initial}
         if action not in {'final', 'status'}:
