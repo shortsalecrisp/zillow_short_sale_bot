@@ -10,6 +10,10 @@ import pilot_verifier_contract as contract
 
 class PilotVerifierContractTest(unittest.TestCase):
     def setUp(self):
+        gate = mock.patch('verifier_closeout.handle', return_value={
+            'terminal': {'complete': True, 'run_kind': 'organic_scheduled'}})
+        self.native_gate = gate.start()
+        self.addCleanup(gate.stop)
         self.now = dt.datetime(2026, 8, 31, 12, 25, tzinfo=dt.timezone.utc)
         self.source = [(2, dict(schedule_slot_id="source:2026-08-31", run_mode="scheduled_source",
                                 status="completed", pipeline_complete="true", observed_at="2026-08-31T11:10:00Z"))]
@@ -394,6 +398,24 @@ class PilotVerifierContractTest(unittest.TestCase):
              mock.patch.object(contract.pilot, "append_values") as append:
             result = contract.handle("token", "sheet", self.request("receipt"), now=self.now)
         self.assertTrue(result["duplicate"])
+        append.assert_not_called()
+
+    def test_receipt_cannot_bypass_missing_native_begin_capture(self):
+        self.native_gate.side_effect = ValueError('missing_initial_run_capture_terminal_forbidden')
+        with mock.patch.object(contract, 'snapshot', return_value=self.snapshot()), \
+             mock.patch.object(contract.pilot, 'append_values') as append:
+            with self.assertRaisesRegex(ValueError, 'missing_initial_run_capture'):
+                contract.handle('token','sheet',self.request('receipt'),now=self.now)
+        append.assert_not_called()
+
+    def test_receipt_cannot_bypass_unresolved_late_initial(self):
+        self.native_gate.return_value = {'terminal': {'complete':False,'run_kind':'organic_scheduled',
+            'sms_open_rows':[6842],'late_rows':[6842],
+            'audit':{'execution_closeout':{'contact_open_rows':[], 'errors':[]}}}}
+        with mock.patch.object(contract, 'snapshot', return_value=self.snapshot()), \
+             mock.patch.object(contract.pilot, 'append_values') as append:
+            with self.assertRaisesRegex(ValueError, 'verifier_terminal_gate_open'):
+                contract.handle('token','sheet',self.request('receipt'),now=self.now)
         append.assert_not_called()
 
     def test_backfill_is_forbidden(self):

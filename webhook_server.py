@@ -9578,6 +9578,23 @@ async def sms_chatbot_get(request: Request):
         return {"ok": False, "error": str(exc), "should_reply": False}
 
 
+@app.post("/internal/verifier-closeout")
+async def internal_verifier_closeout(request: Request):
+    """Native initial/final cohort proof; never sends or changes Sheet1."""
+    _auth_internal_request(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+    def execute():
+        from verifier_closeout import handle
+        from scripts.free_short_sale_source_pilot import sheets_client
+        return handle(sheets_client(SC_JSON), GSHEET_ID, payload)
+    try:
+        return await asyncio.to_thread(execute)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/internal/pilot-verifier-contract")
 async def internal_pilot_verifier_contract(request: Request):
     """Shared Pilot-only owner writes/receipts; this route cannot send outreach."""
