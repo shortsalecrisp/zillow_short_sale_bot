@@ -94,7 +94,7 @@ def test_journal_digest_and_chunks_have_saved_readback():
     rows = [gate.HEADERS]
     def append(_,__,___,values): rows.extend(values)
     artifact = dict(observed_at=dt.datetime.now(dt.timezone.utc).isoformat(),values=['proof']*1000)
-    with mock.patch.object(gate.sheets,'get_values',side_effect=lambda *_:rows), \
+    with mock.patch.object(gate,'batch_read',side_effect=lambda *_:[rows]), \
          mock.patch.object(gate.sheets,'append_values',side_effect=append):
         gate.journal_write('token','sheet','run-identifier','lead-verifier-5-pm','initial',artifact)
         assert gate.journal_read('token','sheet','run-identifier','initial') == artifact
@@ -165,3 +165,13 @@ def test_old_uncertainty_is_visible_but_only_explicit_carried_rows_join_current_
     assert fresh['historical_open_initials'][0]['row'] == 2
     assert 2 in carried['tables']['Sheet1']['detail_rows']
     assert gate.evaluate(carried,carried_rows=carried['carried_rows'])['sms_review_rows'] == [2]
+
+
+def test_native_read_retries_quota_without_replaying_any_write():
+    import urllib.error
+    transient = urllib.error.HTTPError('https://sheets.example',429,'rate limited',{},None)
+    with mock.patch.object(gate.sheets,'sheets_request',side_effect=[transient,{'valueRanges':[]}]) as api, \
+         mock.patch.object(gate.time,'sleep') as sleep:
+        assert gate.native_get('token','sheet') == {'valueRanges':[]}
+    assert all(call.args[1]=='GET' for call in api.call_args_list)
+    sleep.assert_called_once_with(5)

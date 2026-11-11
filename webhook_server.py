@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.error
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -9593,6 +9594,10 @@ async def internal_verifier_closeout(request: Request):
         return await asyncio.to_thread(execute)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 500, 502, 503, 504):
+            raise HTTPException(status_code=503, detail='native_proof_read_unavailable_retry_after_60_seconds') from exc
+        raise
 
 
 @app.post("/internal/pilot-verifier-contract")
@@ -9615,6 +9620,10 @@ async def internal_pilot_verifier_contract(request: Request):
         return await asyncio.to_thread(execute)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 500, 502, 503, 504):
+            raise HTTPException(status_code=503, detail='native_proof_read_unavailable_retry_after_60_seconds') from exc
+        raise
 
 
 @app.post("/internal/pilot-verifier-queue/process")

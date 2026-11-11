@@ -9,7 +9,9 @@ import hashlib
 import json
 import re
 import threading
+import time
 import urllib.parse
+import urllib.error
 from zoneinfo import ZoneInfo
 
 from scripts import free_short_sale_source_pilot as sheets
@@ -24,14 +26,24 @@ LOCK = threading.RLock()
 VERSION = 'native_verifier_closeout_v1'
 
 
+def native_get(token, path):
+    for attempt, delay in enumerate((5, 20, 45, 0)):
+        try:
+            return sheets.sheets_request(token, 'GET', path)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (429, 500, 502, 503, 504) or not delay:
+                raise
+            time.sleep(delay)  # Read-only retry; never replay a send or lease.
+
+
 def batch_read(token, sid, specs):
     """Each spec is a bounded range. Empty successful blocks may be padded."""
     result = []
-    for start in range(0, len(specs), 4):
-        group = specs[start:start + 4]
+    for start in range(0, len(specs), 12):
+        group = specs[start:start + 12]
         query = urllib.parse.urlencode([('valueRenderOption', 'UNFORMATTED_VALUE')] +
                                       [('ranges', spec) for spec in group])
-        response = sheets.sheets_request(token, 'GET', f'{sid}/values:batchGet?{query}')
+        response = native_get(token, f'{sid}/values:batchGet?{query}')
         blocks = response.get('valueRanges')
         if not isinstance(blocks, list) or len(blocks) != len(group):
             raise ValueError('incomplete_native_capture')
@@ -71,7 +83,7 @@ def identity(row):
 
 
 def capture(token, sid, frozen=(), carried_rows=()):
-    meta = sheets.sheets_request(token, 'GET', f'{sid}?fields=sheets.properties')
+    meta = native_get(token, f'{sid}?fields=sheets.properties')
     sizes = {s['properties']['title']: s['properties']['gridProperties']['rowCount'] for s in meta['sheets']}
     main = grid_read(token, sid, 'Sheet1', sizes['Sheet1'], 'G')
     meaningful_rows = meaningful(main)
@@ -186,7 +198,7 @@ def capture(token, sid, frozen=(), carried_rows=()):
 
 
 def journal_read(token, sid, run_id, phase):
-    rows = sheets.get_values(token, sid, f"'{TAB}'!A:H")
+    rows = batch_read(token, sid, [f"'{TAB}'!A:H"])[0]
     matches = [r for r in rows[1:] if len(r) == 8 and r[0] == run_id and r[2] == phase]
     if not matches:
         return None

@@ -435,6 +435,28 @@ def handle(token, spreadsheet_id, payload, *, now=None):
     }:
         raise ValueError("invalid_action_or_automation")
     with _WRITE_LOCK:
+        if action == 'receipt':
+            # Gate before expensive Pilot discovery, not merely before append.
+            if payload.get('run_date', now.astimezone(NY).date().isoformat()) != now.astimezone(NY).date().isoformat():
+                raise ValueError('historical_receipt_forbidden')
+            receipt_id = str(payload.get('run_receipt_id', ''))
+            if not re.fullmatch(r'[A-Za-z0-9_-]{12,100}', receipt_id):
+                raise ValueError('unique_run_receipt_id_required')
+            from verifier_closeout import handle as native_closeout
+            terminal = native_closeout(token, spreadsheet_id, {
+                'action': 'final', 'automation_id': automation,
+                'run_receipt_id': receipt_id,
+                'contact_resolutions': payload.get('contact_resolutions', {}),
+            })['terminal']
+            if terminal.get('run_kind') != 'organic_scheduled':
+                raise ValueError('organic_scheduled_closeout_required')
+            if not terminal['complete']:
+                raise ValueError('verifier_terminal_gate_open:' + str({
+                    'sms_open_rows': terminal['sms_open_rows'],
+                    'contact_open_rows': terminal['audit']['execution_closeout']['contact_open_rows'],
+                    'late_rows': terminal['late_rows'],
+                    'errors': terminal['audit']['execution_closeout']['errors'],
+                }))
         ph, rows, main_rows, rh, receipts = snapshot(token, spreadsheet_id)
         evidence_cache = {}
 
@@ -731,24 +753,6 @@ def handle(token, spreadsheet_id, payload, *, now=None):
         if action == "receipt":
             if not re.fullmatch(r"[A-Za-z0-9_-]{12,100}", receipt_id):
                 raise ValueError("unique_run_receipt_id_required")
-            # A model-supplied green flag or omitted local CLI cannot bypass this.
-            # The production writer itself captures final additions and executes
-            # the exact frozen+final ledger gate before accepting a receipt.
-            from verifier_closeout import handle as native_closeout
-            terminal = native_closeout(token, spreadsheet_id, {
-                'action': 'final', 'automation_id': automation,
-                'run_receipt_id': receipt_id,
-                'contact_resolutions': payload.get('contact_resolutions', {}),
-            })['terminal']
-            if terminal.get('run_kind') != 'organic_scheduled':
-                raise ValueError('organic_scheduled_closeout_required')
-            if not terminal['complete']:
-                raise ValueError('verifier_terminal_gate_open:' + str({
-                    'sms_open_rows': terminal['sms_open_rows'],
-                    'contact_open_rows': terminal['audit']['execution_closeout']['contact_open_rows'],
-                    'late_rows': terminal['late_rows'],
-                    'errors': terminal['audit']['execution_closeout']['errors'],
-                }))
             # Idempotent retries return the existing owner receipt, never overwrite it.
             same_id = [(n, r) for n, r in receipts if r.get("run_receipt_id") == receipt_id]
             if same_id:
