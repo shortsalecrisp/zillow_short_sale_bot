@@ -3842,7 +3842,11 @@ def _claim_next_initial_sms_queue_item(ws) -> Optional[Dict[str, Any]]:
                 claimed_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
                 if claimed_at and claimed_at > stale_cutoff:
                     continue
-            elif status != "pending":
+            elif status == "pending":
+                retry_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
+                if retry_at and retry_at > datetime.now(timezone.utc):
+                    continue
+            else:
                 continue
             request_id = str(rec.get("request_id", "")).strip()
             if not request_id:
@@ -3896,6 +3900,14 @@ def _process_initial_sms_queue_item(ws, item: Dict[str, Any]) -> None:
     except HTTPException as exc:
         detail = exc.detail
         error = detail if isinstance(detail, str) else json.dumps(detail, separators=(",", ":"), ensure_ascii=False)
+        from initial_sms_recovery import retryable_error
+        if retryable_error(exc.status_code, detail):
+            item.update(status="pending", completed_at="", result_json="",
+                        claimed_at=(datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+                        error="retryable_enqueue_reconcile:" + error[:1800])
+            with _initial_sms_queue_lock:
+                _update_initial_sms_queue_row(ws, int(item["_row_num"]), item)
+            return
         _complete_initial_sms_queue_item(ws, item, status="failed", error=error)
         return
     except Exception as exc:
@@ -3906,10 +3918,8 @@ def _process_initial_sms_queue_item(ws, item: Dict[str, Any]) -> None:
 
 
 def _process_initial_sms_queue(*, max_items: int = 20, ignore_initial_hours: bool = False) -> int:
-    if not ignore_initial_hours and not _within_initial_hours(datetime.now(tz=SCHEDULER_TZ)):
-        logger.info("initial-sms-queue: skipped outside approved initial SMS hours")
-        _alert_stale_initial_sms_queue_items()
-        return 0
+    # Enqueue throughout the day; the handset's existing recipient-local
+    # 08:00–20:00 guard owns delivery. Eastern time must not starve Pacific jobs.
     if not _initial_sms_queue_worker_lock.acquire(blocking=False):
         return 0
     processed = 0
@@ -4382,14 +4392,15 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     mark_codex_verified = payload.get("mark_codex_verified", True) is not False
     initial_marked = _row_value(row, 7).lower() == "x"
     initial_ts = _row_value(row, 22).strip()
-    if _row_value(row, 42).lower() == "x" and initial_marked and initial_ts and not force_resend:
-        return {"status": "already_verified", "row": row_idx}
-
     current_phone = fmt_phone(_row_value(row, 2))
     if not current_phone:
         raise HTTPException(status_code=409, detail="row_phone_missing")
     if _digits_only(current_phone) != digits:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
+    if payload.get("stable_id") and str(payload["stable_id"]) != _row_value(row, 27):
+        raise HTTPException(status_code=409, detail="row_stable_id_mismatch")
+    if _row_value(row, 42).lower() == "x" and initial_marked and initial_ts and not force_resend:
+        return {"status": "already_verified", "row": row_idx}
 
     active_file = _active_crisp_file_lookup(row)
     if active_file.get("unavailable"):
@@ -9627,7 +9638,23 @@ async def internal_send_initial_sms(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_payload")
 
-    return await asyncio.to_thread(_send_initial_sms_from_payload, payload)
+    try:
+        return await asyncio.to_thread(_send_initial_sms_from_payload, payload)
+    except HTTPException as exc:
+        from initial_sms_recovery import persist, retryable_error
+        if retryable_error(exc.status_code, exc.detail):
+            # A 502 may already have committed an outbox row. Persist the same
+            # request for the existing guarded, idempotent enqueue to reconcile.
+            # Never manufacture a second message or reset a phone-side lease.
+            row = await asyncio.to_thread(_get_leads_ws().row_values, int(payload['row']))
+            pinned = dict(payload)
+            pinned['stable_id'] = _row_value(row, 27)
+            queue = await asyncio.to_thread(_get_initial_sms_queue_ws)
+            with _initial_sms_queue_lock:
+                intent = persist(queue, pinned, 'production-initial-recovery',
+                                 (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat())
+            logger.warning('INITIAL_SMS_DURABLE_RETRY request_id=%s row=%s', intent, payload['row'])
+        raise
 
 
 @app.post("/internal/process-initial-sms-queue")

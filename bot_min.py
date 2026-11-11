@@ -13009,33 +13009,20 @@ def schedule_initial_sms(
         )
         return
 
-    now = datetime.now(tz=SCHEDULER_TZ)
-    if _within_initial_hours(now):
-        send_sms(phone, first, address, row_idx, stable_id=stable_id)
-        return
-
-    next_start = _next_work_start(now, include_weekends=True)
-    sleep_secs = max(0, (next_start - now).total_seconds())
-    LOG.info(
-        "Initial SMS outside send window (%s–%s); sleeping %.2fs until %s (now=%s)",
-        WORK_START,
-        INITIAL_SMS_END,
-        sleep_secs,
-        next_start.isoformat(),
-        now.isoformat(),
+    from initial_sms_recovery import persist
+    queue = _retry_gspread_call(
+        'open durable initial queue',
+        lambda: gc.open_by_key(GSHEET_ID).worksheet('Initial SMS Queue'),
     )
-
-    def _delayed_send() -> None:
-        if sleep_secs:
-            time.sleep(sleep_secs)
-        send_sms(phone, first, address, row_idx, stable_id=stable_id)
-
-    thread = threading.Thread(
-        target=_delayed_send,
-        name=f"initial-sms-{row_idx}",
-        daemon=True,
-    )
-    thread.start()
+    request_id = persist(queue, {
+        'row': row_idx,
+        'phone': SMS_TEST_NUMBER if SMS_TEST_MODE and SMS_TEST_NUMBER else phone,
+        'first': first, 'address': address, 'stable_id': str(stable_id or ''),
+        'mark_codex_verified': False,
+    }, 'listing-producer')
+    LOG.info('INITIAL_SMS_DURABLE_INTENT row=%s request_id=%s', row_idx, request_id)
+    # The existing worker performs the guarded enqueue. Apps Script owns the
+    # recipient-local not-before window; restarts cannot erase this intent.
 
 def check_reply(phone: str, since_iso: str) -> bool:
     """Return True if a reply from *phone* has been received since *since_iso*."""
