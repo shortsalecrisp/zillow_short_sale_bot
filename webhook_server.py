@@ -9749,6 +9749,11 @@ async def internal_text_followup_policy(request: Request):
             "personalized_video_enabled": os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true",
             "video_generation_enabled": os.getenv("VIDEO_FOLLOWUP_GENERATION_ENABLED", "false").lower() == "true",
             "video_live_approved": os.getenv("VIDEO_FOLLOWUP_LIVE_APPROVED", "false").lower() == "true",
+            "video_initials_after": os.getenv("VIDEO_FOLLOWUP_INITIALS_AFTER", ""),
+            "video_future_only_after": os.getenv("VIDEO_FOLLOWUP_FUTURE_ONLY_AFTER", ""),
+            "video_daily_cents": os.getenv("VIDEO_FOLLOWUP_DAILY_CENTS", "300"),
+            "video_monthly_cents": os.getenv("VIDEO_FOLLOWUP_MONTHLY_CENTS", "7500"),
+            "video_per_item_cents": 10,
             "recovery_requires_pinned_episode": True, "sent": False}
 
 

@@ -486,6 +486,14 @@ def test_pinned_text_recovery_has_no_unpinned_or_video_fallback(monkeypatch):
     proof = client.get("/internal/text-followup-policy", headers=headers).json()
     assert proof["ordinary_text_only"] is True
     assert proof["personalized_video_enabled"] is proof["video_generation_enabled"] is proof["video_live_approved"] is False
+    assert proof["video_per_item_cents"] == 10
+    monkeypatch.setenv("VIDEO_FOLLOWUP_INITIALS_AFTER", "2026-11-11T18:00:00Z")
+    monkeypatch.setenv("VIDEO_FOLLOWUP_FUTURE_ONLY_AFTER", "2026-11-11T18:00:00Z")
+    monkeypatch.setenv("VIDEO_FOLLOWUP_DAILY_CENTS", "300")
+    monkeypatch.setenv("VIDEO_FOLLOWUP_MONTHLY_CENTS", "7500")
+    proof = client.get("/internal/text-followup-policy", headers=headers).json()
+    assert proof["video_initials_after"] == proof["video_future_only_after"] == "2026-11-11T18:00:00Z"
+    assert (proof["video_daily_cents"], proof["video_monthly_cents"]) == ("300", "7500")
 
 
 def test_owner_confirmed_text_recovery_is_authenticated_exact_and_never_sends_directly(monkeypatch):

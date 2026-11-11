@@ -176,6 +176,9 @@ class Config:
         self.not_before = env.get("VIDEO_FOLLOWUP_INITIALS_AFTER", "").strip()
         if self.not_before:
             self.not_before = iso(self.not_before)
+        self.future_only_after = env.get("VIDEO_FOLLOWUP_FUTURE_ONLY_AFTER", "").strip()
+        if self.future_only_after:
+            self.future_only_after = iso(self.future_only_after)
         self.allowlist = {canonical_phone(p) for p in env.get("VIDEO_FOLLOWUP_TEST_PHONES", "").split(",") if p.strip()}
         self.daily_cents = int(env.get("VIDEO_FOLLOWUP_DAILY_CENTS", "300"))
         self.monthly_cents = int(env.get("VIDEO_FOLLOWUP_MONTHLY_CENTS", "7500"))
@@ -193,7 +196,30 @@ class Config:
             return False
         if iso(context["initial_sent_at"]) < iso(self.not_before):
             return False
+        if self.future_only_after and iso(context["initial_sent_at"]) < self.future_only_after:
+            return False
         return self.live or context["phone"] in self.allowlist
+
+    def future_context_allowed(self, context):
+        # A CRM timestamp alias must not make an old initial receipt look new.
+        if not self.future_only_after:
+            return True
+        try:
+            receipt = context["initial_receipt"]
+            initial_receipt_binding(context, receipt)
+            return (iso(context["initial_sent_at"]) >= self.future_only_after
+                    and iso(receipt["send_started_at"]) >= self.future_only_after
+                    and iso(receipt["sent_at"]) >= self.future_only_after)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    def future_job_allowed(self, job):
+        if not self.future_only_after:
+            return True
+        try:
+            return self.future_context_allowed(job) and iso(job["created_at"]) >= self.future_only_after
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
 
 
 class GCSObjects:
@@ -743,6 +769,8 @@ class Worker:
             if not entry.get("inflight"):
                 continue
             job, _ = self.store.read("jobs/" + key)
+            if not self.config.future_job_allowed(job):
+                continue
             if not self._capacity_is_terminal(job):
                 continue
             # Terminal jobs are never submitted again. Keep their full debit,
@@ -755,6 +783,8 @@ class Worker:
     def audit_ready(self, key):
         """Free, explicit audit for an unfrozen ready job, even with generation off."""
         job, _ = self.store.read("jobs/" + key)
+        if not self.config.future_job_allowed(job):
+            return False
         if (not job or job.get("status") != "ready" or job.get("variant")
                 or job.get("script_version") != SCRIPT_VERSION):
             return False
@@ -806,6 +836,8 @@ class Worker:
     def run_job(self, key):
         job, version = self.store.read("jobs/" + key)
         if not job:
+            return
+        if not self.config.future_job_allowed(job):
             return
         if job.get("script_version") != SCRIPT_VERSION:
             # Old provider IDs must never enter the new same-recording pipeline.
@@ -988,8 +1020,13 @@ class Worker:
         for path in self.store.objects.list("active/", limit=1000):
             key = path.split("/")[-1]
             try:
+                existing, _ = self.store.read("jobs/" + key)
+                if not self.config.future_job_allowed(existing):
+                    continue
                 self.run_job(key)
                 job, _ = self.store.read("jobs/" + key)
+                if not self.config.future_job_allowed(job):
+                    continue
                 accounting_pending = job and job.get("provider_id") and not job.get("budget_settled") and job["status"] in {"cancelled", "frozen_text"}
                 audit_pending = (job and job["status"] == "ready" and not job.get("variant")
                                  and job.get("verification_retry_pending"))
@@ -1024,6 +1061,8 @@ class Service:
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
             raise InitialReceiptHold("Stored receipt owner identity is invalid")
         job, _ = self.store.read("jobs/" + key)
+        if not self.config.future_job_allowed(job):
+            return None, None
         # Only jobs created with this selection contract opt in. Never migrate
         # legacy jobs or turn an old terminal/frozen attempt into a catch-up send.
         if (not isinstance(job, dict) or job.get("receipt_selection_version") != RECEIPT_SELECTION_VERSION
@@ -1048,7 +1087,12 @@ class Service:
 
     def prepare(self, context):
         context = {**context, "first_name": normalize_name(context["first_name"])}
-        if self.config.accepts(context) and valid_name(context["first_name"]):
+        if (self.config.accepts(context) and self.config.future_context_allowed(context)
+                and valid_name(context["first_name"])):
+            if self.config.future_only_after:
+                existing, _ = self.store.read("jobs/" + context["followup_key"])
+                if existing is not None and not self.config.future_job_allowed(existing):
+                    return None
             return self.store.prepare(context)
 
     def select(self, context, fallback, *, allow_ready_audit=True):
@@ -1061,6 +1105,8 @@ class Service:
         try:
             selected_job = None
             job, _ = self.store.read("jobs/" + context["followup_key"])
+            if job is not None and not self.config.future_job_allowed(job):
+                return fallback, metadata
             if job is None:
                 selected, selected_job = self._receipt_owned_selection(context)
                 if selected is None:
@@ -1079,6 +1125,8 @@ class Service:
                     raise InitialReceiptHold("Supplied initial receipt differs from the frozen job")
                 context.update(binding)
                 metadata.update(binding)
+            if not self.config.future_context_allowed(context):
+                return fallback, metadata
             if (job and job.get("status") == "failed" and not job.get("variant")
                     and job.get("receipt_selection_version") == RECEIPT_SELECTION_VERSION):
                 # A failed video is not a recipient suppression. Keep the job
