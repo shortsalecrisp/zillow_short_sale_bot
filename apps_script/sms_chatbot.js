@@ -270,6 +270,39 @@ function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
   return Math.abs(receivedTs - lastContactTs) <= 5 * 60 * 1000;
 }
 
+function isRecentHandledCoalescedSuffixReplay_(rowObj, inboundText, receivedAt) {
+  const priorText = canonicalizeRepeatedCompleteInboundForDedupe_(
+    rowObj && rowObj[HEADERS.last_inbound_text]
+  );
+  const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
+  if (!priorText || !currentText || priorText === currentText || isOptOutSignal_(inboundText)) {
+    return false;
+  }
+
+  const currentTokens = currentText.split(" ");
+  const priorTokens = priorText.split(" ");
+  if (currentTokens.length < 3 || priorTokens.length <= currentTokens.length) return false;
+  if (priorTokens.slice(-currentTokens.length).join(" ") !== currentText) return false;
+
+  const lastContactRaw = rowObj && (
+    rowObj[HEADERS.last_inbound_at] || rowObj[HEADERS.last_contact_time]
+  );
+  const lastContactTs = lastContactRaw instanceof Date
+    ? lastContactRaw.getTime()
+    : Date.parse(String(lastContactRaw || ""));
+  const receivedTs = receivedAt instanceof Date
+    ? receivedAt.getTime()
+    : Date.parse(String(receivedAt || ""));
+  if (Number.isNaN(lastContactTs) || Number.isNaN(receivedTs) ||
+      Math.abs(receivedTs - lastContactTs) > 5 * 60 * 1000) {
+    return false;
+  }
+
+  // Suppress only after the complete coalesced turn already received a
+  // durable sent reply. Without that receipt, the later fragment stays live.
+  return historyHasConfirmedReplyAfterInbound_(rowObj, priorText);
+}
+
 function isAnsweredRepeatedInboundQuestion_(rowObj, inboundText) {
   if (!isSubstantiveFollowupSignal_(inboundText) || isSchedulingSignal_(inboundText) ||
       isPostHandoffCallbackUpdate_(rowObj, inboundText)) return false;
@@ -563,6 +596,21 @@ function handleIncomingSmsCore_(body) {
         duplicate: true,
         should_reply: false,
         reason: "Duplicate message_id ignored"
+      };
+    }
+
+    if (!recoveringSameMessage && isRecentHandledCoalescedSuffixReplay_(rowObj, inboundText, receivedAt)) {
+      appendSmsDebugLog_("incoming_sms_coalesced_suffix_suppressed", {
+        phone: phoneRaw,
+        message: inboundText,
+        reason: "Recent handled coalesced suffix replay suppressed"
+      });
+
+      return {
+        ok: true,
+        duplicate: true,
+        should_reply: false,
+        reason: "Recent handled coalesced suffix replay ignored"
       };
     }
 
@@ -8819,6 +8867,33 @@ function testApprovedLeadIntelligenceRules_() {
       !isDurableHandledDuplicateInbound_(coalescedDuplicateRow, "I have someone already") ||
       isDurableHandledDuplicateInbound_(coalescedDuplicateRow, "I have someone already, what is your fee?")) {
     throw new Error("Coalesced complete-message replay suppression regression");
+  }
+  const handledCoalescedBurst = "Yes So far offers have been declined";
+  const handledCoalescedSuffixRow = {
+    [HEADERS.last_inbound_text]: handledCoalescedBurst,
+    [HEADERS.last_inbound_at]: "2026-11-10T19:05:00.000Z",
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: handledCoalescedBurst, ts: "2026-11-10T19:05:00.000Z" },
+      { role: "assistant", text: "We can help with the lender process.", receipt_id: "sent-1",
+        ts: "2026-11-10T19:05:30.000Z" }
+    ])
+  };
+  if (!isRecentHandledCoalescedSuffixReplay_(
+        handledCoalescedSuffixRow,
+        "So far offers have been declined",
+        "2026-11-10T19:08:00.000Z"
+      ) ||
+      isRecentHandledCoalescedSuffixReplay_(
+        handledCoalescedSuffixRow,
+        "What do you charge?",
+        "2026-11-10T19:08:00.000Z"
+      ) ||
+      isRecentHandledCoalescedSuffixReplay_(
+        handledCoalescedSuffixRow,
+        "So far offers have been declined",
+        "2026-11-10T19:11:00.000Z"
+      )) {
+    throw new Error("Handled coalesced suffix replay guard regression");
   }
   const offerSubmissionDecision = applyFastRules_("Submit your offer subject to inspection", {});
   if (!isOfferSubmissionConfusionSignal_("Submit your offer subject to inspection") ||

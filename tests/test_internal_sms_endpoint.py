@@ -4354,6 +4354,64 @@ def test_sms_contract_coalesced_complete_message_replay_is_durably_suppressed(mo
     assert module._sms_is_durable_handled_duplicate(row, "I have someone already, what is your fee?") is False
 
 
+def test_sms_recent_handled_coalesced_suffix_replay_is_suppressed(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    full_burst = "Yes So far offers have been declined"
+    row = {
+        "last_inbound_text": full_burst,
+        "last_inbound_at": "2026-11-10T19:05:00Z",
+        "history_json": json.dumps([
+            {"role": "agent", "text": full_burst, "ts": "2026-11-10T19:05:00Z"},
+            {
+                "role": "assistant",
+                "text": "We can help with the lender process.",
+                "receipt_id": "sent-1",
+                "ts": "2026-11-10T19:05:30Z",
+            },
+        ]),
+    }
+
+    assert module._sms_is_recent_handled_coalesced_suffix_replay(
+        row,
+        "So far offers have been declined",
+        "2026-11-10T19:08:00Z",
+    ) is True
+    assert module._sms_is_recent_handled_coalesced_suffix_replay(
+        row,
+        "What do you charge?",
+        "2026-11-10T19:08:00Z",
+    ) is False
+    assert module._sms_is_recent_handled_coalesced_suffix_replay(
+        row,
+        "So far offers have been declined",
+        "2026-11-10T19:11:00Z",
+    ) is False
+
+
+def test_sms_coalesced_suffix_without_sent_receipt_remains_eligible(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    full_burst = "Yes So far offers have been declined"
+    row = {
+        "last_inbound_text": full_burst,
+        "last_inbound_at": "2026-11-10T19:05:00Z",
+        "history_json": json.dumps([
+            {"role": "agent", "text": full_burst, "ts": "2026-11-10T19:05:00Z"},
+        ]),
+    }
+
+    assert module._sms_is_recent_handled_coalesced_suffix_replay(
+        row,
+        "So far offers have been declined",
+        "2026-11-10T19:08:00Z",
+    ) is False
+
+
 def test_sms_closed_conversation_repeat_does_not_depend_on_response_status(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

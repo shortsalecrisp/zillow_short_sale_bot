@@ -5891,6 +5891,34 @@ def _sms_is_recent_duplicate_inbound(row_obj: Dict[str, str], inbound_text: str,
     return abs((current_at - prior_at).total_seconds()) <= 5 * 60
 
 
+def _sms_is_recent_handled_coalesced_suffix_replay(
+    row_obj: Dict[str, str], inbound_text: str, received_at: str
+) -> bool:
+    prior_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("last_inbound_text"))
+    current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
+    if (
+        not prior_text
+        or not current_text
+        or prior_text == current_text
+        or _sms_is_opt_out(inbound_text)
+    ):
+        return False
+
+    prior_tokens = prior_text.split()
+    current_tokens = current_text.split()
+    if len(current_tokens) < 3 or len(prior_tokens) <= len(current_tokens):
+        return False
+    if prior_tokens[-len(current_tokens) :] != current_tokens:
+        return False
+
+    prior_at = _sms_parse_inbound_timestamp(row_obj.get("last_inbound_at") or row_obj.get("last_contact_time"))
+    current_at = _sms_parse_inbound_timestamp(received_at)
+    if not prior_at or not current_at or abs((current_at - prior_at).total_seconds()) > 5 * 60:
+        return False
+
+    return _sms_history_has_confirmed_reply_after_inbound(row_obj, prior_text)
+
+
 def _sms_is_answered_repeated_inbound_question(row_obj: Dict[str, str], inbound_text: str) -> bool:
     if (
         not _sms_is_substantive_followup(inbound_text)
@@ -9089,6 +9117,21 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         return _sms_normalize_tasker_payload(
             {"ok": True, "duplicate": True, "should_reply": False, "reason": "Duplicate message_id ignored"}
         )
+
+    if _sms_is_recent_handled_coalesced_suffix_replay(row_obj, inbound_text, received_at):
+        result = _sms_normalize_tasker_payload(
+            {
+                "ok": True,
+                "duplicate": True,
+                "should_reply": False,
+                "reason": "Recent handled coalesced suffix replay ignored",
+            }
+        )
+        _sms_append_debug(
+            "incoming_sms_coalesced_suffix_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message": inbound_text, "reason": result["reason"]},
+        )
+        return result
 
     if _sms_is_recent_duplicate_inbound(row_obj, inbound_text, received_at):
         result = _sms_normalize_tasker_payload(
