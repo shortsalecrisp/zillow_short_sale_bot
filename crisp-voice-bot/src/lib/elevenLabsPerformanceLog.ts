@@ -142,7 +142,9 @@ function automatedContactType(message: string): AutomatedContact | null {
     return "screening";
   }
   if (/\b(?:press|dial) (?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/.test(text) ||
-      /\b(?:call cannot be completed|number (?:you (?:have )?dialed )?is (?:not in service|disconnected)|all (?:of our )?(?:representatives|agents) are busy)\b/.test(text)) {
+      /\b(?:call cannot be completed|number (?:you (?:have )?dialed )?is (?:not in service|disconnected)|all (?:of our )?(?:representatives|agents) are busy)\b/.test(text) ||
+      /\b(?:the )?(?:system|service|call)?\s*(?:cannot|can't|could not|is unable to)\s+(?:process (?:your )?(?:entry|entries|selection|response)|connect (?:you|your call|the call))(?: at this time)?\b/.test(text) ||
+      /\b(?:invalid|no) (?:entry|selection|input)\b/.test(text)) {
     return "ivr";
   }
   return null;

@@ -73,6 +73,9 @@ function isAutomatedMessage(message: string): boolean {
     /\b(?:please\s+)?stay on the line\b/.test(text) ||
     /\bplease hold while (?:i|we) (?:try to )?connect you\b/.test(text) ||
     /\b(?:the )?call could not be connected\b/.test(text) ||
+    /\b(?:the )?(?:system|service|call)?\s*(?:cannot|can't|could not|is unable to)\s+(?:process (?:your )?(?:entry|entries|selection|response)|connect (?:you|your call|the call))(?: at this time)?\b/.test(text) ||
+    /\b(?:invalid|no) (?:entry|selection|input)\b/.test(text) ||
+    /\b(?:we|the system) (?:did not|didn't) receive (?:a |your )?(?:response|selection|entry|input)\b/.test(text) ||
     /\bone moment while\b/.test(text) ||
     /\bi(?:'|’)ll see if (?:this person|they|he|she) is available\b/.test(text)
     || /\bcall assist by google\b/.test(text)

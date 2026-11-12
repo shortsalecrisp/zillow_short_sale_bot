@@ -1499,7 +1499,10 @@ export function getAuthoritativeTerminalCallResult(
   )) return "identity_mismatch_voicemail";
 
   if (hasTerminalVoicemailManagementMenu(conversation.transcript ?? [])) {
-    return getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
+    // A voicemail-management phone tree can finish with a generic system
+    // error instead of a voicemail detector receipt. It is still terminal
+    // automation, never evidence that a human target answered and hung up.
+    return getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber) ?? "agent_not_available";
   }
 
   const unresolvedPhoneMenu = isRecordingOrScreeningArtifact(conversation.transcript ?? []) &&
@@ -1884,6 +1887,39 @@ export function hasLiveHumanGatekeeperEvidence(
   });
 
   const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const brokeragePrefix = (value: string): boolean =>
+    /\b(?:real estate|realty|properties|brokerage|office|group|team|keller williams|coldwell banker|century 21|compass|e\s*x\s*p|re\/?max|sotheby'?s|berkshire hathaway)\b/.test(value);
+  const brokerageResponder = transcript.map((item, index) => {
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
+      return undefined;
+    }
+    const message = normalizeText(item.message);
+    const introduction = message.match(/^(?:thank you for calling\s+)?(.{2,90}?)[,.]\s*this is\s+([a-z][a-z'-]*)(?:[.!?, ]|$)/) ??
+      message.match(/^this is\s+([a-z][a-z'-]*)\s+(?:with|at|from)\s+(.{2,90})$/);
+    if (!introduction) return undefined;
+    const reverse = /^this is\b/.test(message);
+    const responder = reverse ? introduction[1] : introduction[2];
+    const organization = reverse ? introduction[2] : introduction[1];
+    if (!brokeragePrefix(organization) || !expected || nameSoundsSimilar(responder, expected)) return undefined;
+    return { index, responder };
+  }).find(Boolean);
+
+  if (brokerageResponder) {
+    let lastAssistantMessage = "";
+    for (let index = brokerageResponder.index + 1; index < transcript.length; index += 1) {
+      const item = transcript[index];
+      if ((item.role === "assistant" || item.role === "agent") && typeof item.message === "string") {
+        lastAssistantMessage = normalizeText(item.message);
+        continue;
+      }
+      if (item.role !== "user" || typeof item.message !== "string") continue;
+      const message = normalizeText(item.message);
+      const namesExpected = new RegExp(`\\b(?:this is|it is|it's|i am|i'm)\\s+${expected}\\b|\\b${expected}\\s+(?:speaking|here)\\b`).test(message);
+      const directIdentityAnswer = /^(?:yes|yeah|yep|speaking|this is (?:he|she)|i am)[.!? ]*$/.test(message) &&
+        new RegExp(`\\b(?:is this|am i speaking (?:with|to))\\s+${expected}\\b`).test(lastAssistantMessage);
+      if (namesExpected || directIdentityAnswer) return false;
+    }
+  }
   const differentNamedPickup = Boolean(expected) && transcript.some((item, index) => {
     if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
       return false;
@@ -1901,6 +1937,9 @@ export function hasLiveHumanGatekeeperEvidence(
       typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
     );
   });
+  if (brokerageResponder && transcript.slice(brokerageResponder.index + 1).some(next =>
+    (next.role === "assistant" || next.role === "agent") &&
+    typeof next.message === "string" && hasMeaningfulSpokenContent(next.message))) return true;
 
   // An office pickup may be the first human turn after a phone menu; it
   // need not follow an assistant turn to establish the new live listener.
@@ -1930,8 +1969,8 @@ export function hasLiveHumanGatekeeperEvidence(
       contextualText,
     );
   const officeSelfIdentification = meaningfulUserMessages(conversation).some((message) =>
-    /\b(?:real estate|realty|properties|brokerage|office|group|team)\b.{0,35}\bthis is\b/i.test(message) ||
-    /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/i.test(message),
+    /\b(?:real estate|realty|properties|brokerage|office|group|team|keller williams|coldwell banker|century 21|compass|e\s*x\s*p|re\/?max|sotheby'?s|berkshire hathaway)\b.{0,35}\bthis is\b/i.test(message) ||
+    /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group|team|keller williams|coldwell banker|century 21|compass|e\s*x\s*p|re\/?max|sotheby'?s|berkshire hathaway)\b/i.test(message),
   );
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
