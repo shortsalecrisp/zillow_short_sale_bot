@@ -1457,6 +1457,25 @@ def test_process_excludes_auction_com_before_enrichment_or_append(monkeypatch):
     assert result == {"302017014": "skipped_auction_com"}
 
 
+def test_auction_com_queue_replay_finishes_excluded_without_append(monkeypatch):
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *a, **k: None)
+    for name in ("lookup_phone", "lookup_email", "append_row", "is_active_listing"):
+        monkeypatch.setattr(bot_min, name, lambda *a, **k: (_ for _ in ()).throw(AssertionError("no enrichment or append")))
+    completed = []
+    monkeypatch.setattr(webhook_server, "_complete_queue_item", lambda *a, **k: completed.append((a, k)))
+    webhook_server._process_claimed_queue_item({
+        "zpid": "302017014", "listing_json": json.dumps({
+            "zpid": "302017014", "agentName": "Auction.com Customer Service",
+            "street": "4342 Luster Ave", "city": "North Las Vegas", "state": "NV",
+            "description": "Short sale subject to lender approval.",
+        }),
+    })
+    assert len(completed) == 1
+    args, kwargs = completed[0]
+    assert args[1] == "completed_non_short_sale"
+    assert kwargs == {"result": "skipped_auction_com"}
+
+
 def test_pending_queue_serialization_removes_clickable_urls():
     payload = {
         "zpid": "hi-1",

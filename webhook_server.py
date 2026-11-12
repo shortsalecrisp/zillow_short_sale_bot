@@ -3199,6 +3199,7 @@ FINAL_QUEUE_STATUSES = {
 class QueuePersistenceError(Exception):
     """The webhook cannot acknowledge rows that were not durably queued."""
 TERMINAL_QUEUE_RESULTS = {
+    "skipped_auction_com",
     "skipped_already_contacted_agent",
     "skipped_agent_team",
     "skipped_stale_listing",
