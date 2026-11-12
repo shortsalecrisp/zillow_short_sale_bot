@@ -1431,6 +1431,32 @@ def test_append_rejects_missing_city_before_any_sheet_call():
         raise AssertionError("incomplete address must not be appended")
 
 
+def test_append_rejects_auction_com_before_any_sheet_call(monkeypatch):
+    row = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    row[bot_min.COL_FIRST] = "Auction.com"
+    row[bot_min.COL_LAST] = "Customer Service"
+    row[4:7] = ["4342 Luster Ave", "North Las Vegas", "NV"]
+    monkeypatch.setattr(bot_min, "_find_next_open_row", lambda *a: (_ for _ in ()).throw(AssertionError("no sheet allocation")))
+    try:
+        bot_min.append_row(row)
+    except ValueError as exc:
+        assert str(exc) == "excluded_auction_com"
+    else:
+        raise AssertionError("Auction.com must not be appended")
+
+
+def test_process_excludes_auction_com_before_enrichment_or_append(monkeypatch):
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *a, **k: None)
+    for name in ("lookup_phone", "lookup_email", "append_row", "is_active_listing"):
+        monkeypatch.setattr(bot_min, name, lambda *a, **k: (_ for _ in ()).throw(AssertionError("Auction.com must be excluded first")))
+    result = bot_min.process_rows([{
+        "zpid": "302017014", "agentName": "Auction.com Customer Service",
+        "street": "4342 Luster Ave", "city": "North Las Vegas", "state": "NV",
+        "description": "Short sale subject to lender approval.",
+    }], skip_dedupe=True, return_outcomes=True)
+    assert result == {"302017014": "skipped_auction_com"}
+
+
 def test_pending_queue_serialization_removes_clickable_urls():
     payload = {
         "zpid": "hi-1",

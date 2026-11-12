@@ -39,6 +39,7 @@ from headless_browser import (
 from lightweight_extract import extract_lightweight_snapshot
 from sheet_safety import sanitize_external_links_for_sheet
 from listing_address import extract_address_fields, parse_full_address, missing_address_fields
+from lead_source_exclusions import auction_com_listing_excluded, is_auction_com_identity
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -12295,6 +12296,9 @@ def _row_index_from_append_range(updated_range: str) -> int:
 def append_row(vals) -> int:
     global _next_row_hint
     vals = list(vals)
+    identity = " ".join(_lead_row_cell(vals, column) for column in (COL_FIRST, COL_LAST, COL_EMAIL))
+    if is_auction_com_identity(identity):
+        raise ValueError("excluded_auction_com")
     address = {"street": _lead_row_cell(vals, COL_STREET),
                "city": _lead_row_cell(vals, COL_CITY), "state": _lead_row_cell(vals, COL_STATE)}
     missing = missing_address_fields(address)
@@ -14444,6 +14448,10 @@ def process_rows(
                 bool(listing_text),
             )
         short_sale_text = _short_sale_text_from_payload(listing_text)
+        if auction_com_listing_excluded(r):
+            outcomes[zpid] = "skipped_auction_com"
+            LOG.info("LEAD_SOURCE_EXCLUDE zpid=%s reason=auction_com", zpid)
+            continue
         exclusion_reason = _short_sale_exclusion_reason(
             short_sale_text,
             pilot_origin=_pilot_origin_requires_verifier_hold(r),

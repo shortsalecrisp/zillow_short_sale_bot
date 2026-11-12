@@ -12,6 +12,7 @@ import urllib.parse
 from zoneinfo import ZoneInfo
 
 from scripts import free_short_sale_source_pilot as pilot
+from lead_source_exclusions import auction_com_listing_excluded, is_auction_com_identity
 
 VERSION = "pilot_verifier_contract_v2"
 PILOT_TAB = "Lead Source Pilot"
@@ -168,6 +169,9 @@ def owner_header_positions(headers):
 
 
 def owner_write_updates(headers, row_number, pilot_row, owner, automation):
+    identity = " ".join(str(owner.get(key, "")) for key in ("agent_name", "last_name", "email"))
+    if is_auction_com_identity(identity) or auction_com_listing_excluded(pilot_row):
+        raise ValueError("excluded_auction_com")
     positions = owner_header_positions(headers)
     values = {
         "agent_name": owner["agent_name"], "last_name": owner["last_name"],
