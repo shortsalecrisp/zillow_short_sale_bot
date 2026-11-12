@@ -187,9 +187,32 @@ test('keep-you-posted courtesy after a coverage closeout stays silent', () => {
   assert.match(courtesy.reason, /Reinforcing decline/);
   assert.equal(h.state.call_booking_status, 'warm_future_interest');
 
+  const passiveFuture = h.incoming('But i will keep your number just in case and for the future!');
+  assert.equal(passiveFuture.should_reply, false);
+  assert.match(passiveFuture.reason, /Reinforcing decline/);
+  assert.equal(h.state.call_booking_status, 'warm_future_interest');
+
   const question = h.incoming('What is your fee?');
   assert.equal(question.should_reply, true);
   assert.match(question.reply_text, /\$5,000/);
+});
+
+test('passive future contact retention does not suppress questions or open conversations', () => {
+  const closed = smsHarness({
+    mailshake_status: 'H',
+    ai_state: 'done',
+    call_booking_status: 'closed_no_interest',
+    response_status: 'I already have help.',
+    conversation_summary: 'Current file already covered',
+  });
+  const question = closed.incoming("I'll save your contact for future listings. What is your fee?");
+  assert.equal(question.should_reply, true);
+  assert.match(question.reply_text, /\$5,000/);
+
+  const open = smsHarness();
+  assert.equal(open.evaluate(
+    `isReinforcingDeclineAfterCloseout_("I'll keep your number just in case and for the future.", {})`
+  ), false);
 });
 
 test('a substantive question still reopens after a completed coverage closeout', () => {

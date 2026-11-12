@@ -4220,6 +4220,8 @@ function isReinforcingDeclineAfterCloseout_(text, rowObj) {
       isFutureBuyerRecontactSignal_(t) || isFutureNegotiationInterestSignal_(t)) return false;
   return isAlreadyHandledSignal_(t) || isClearNoSignal_(t) ||
     /\b(?:i|we)(?:['’]?ll| will)?\s*(?:certainly|definitely)?\s*keep (?:you|u) posted\b/.test(t) ||
+    (/\b(?:i|we)(?:['’]?ll| will)?\s*(?:keep|save|hold onto|hang onto)\s+(?:your|the|this)\s+(?:number|contact|info|information|details)\b/.test(t) &&
+      /\b(?:just in case|(?:in|for) the future|for future\b|later on|if (?:a |another |any )?(?:short sale|file|listing|deal|need|opportunity)\b.{0,35}\b(?:comes?|arises?|happens?|up))/.test(t)) ||
     /\b(?:attorneys?|lawyers?|short[- ]sale negotiators?|processors?|teams?|companies?)\b.{0,80}\b(?:that\s+)?(?:i|we)\s+(?:already\s+)?(?:use|work\s+with|have)\b/.test(t) ||
     /\b(?:i|we)(?:['’]?ve| have)\s+(?:used|worked\s+with)\b.{0,70}\b(?:him|her|them|that\s+(?:team|company|person)|this\s+(?:team|company|person))\b/.test(t) ||
     /\b(?:used|worked\s+with)\b.{0,50}\b(?:for\s+)?(?:a\s+few|several|many|dozens?|hundreds?|\d+)\b.{0,30}\bshort\s+sales?\b/.test(t);

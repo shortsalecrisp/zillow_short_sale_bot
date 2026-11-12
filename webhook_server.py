@@ -7061,6 +7061,18 @@ def _sms_is_reinforcing_decline_after_closeout(value: Any, row_obj: Dict[str, st
         _sms_has_existing_coverage(text)
         or _sms_has_decline_or_not_short_sale_clause(text)
         or re.search(r"\b(?:i|we)(?:['’]?ll| will)?\s*(?:certainly|definitely)?\s*keep (?:you|u) posted\b", text)
+        or (
+            re.search(
+                r"\b(?:i|we)(?:['’]?ll| will)?\s*(?:keep|save|hold onto|hang onto)\s+"
+                r"(?:your|the|this)\s+(?:number|contact|info|information|details)\b",
+                text,
+            )
+            and re.search(
+                r"\b(?:just in case|(?:in|for) the future|for future\b|later on|"
+                r"if (?:a |another |any )?(?:short sale|file|listing|deal|need|opportunity)\b.{0,35}\b(?:comes?|arises?|happens?|up))",
+                text,
+            )
+        )
         or re.search(
             r"\b(?:attorneys?|lawyers?|short[- ]sale negotiators?|processors?|teams?|companies?)\b.{0,80}"
             r"\b(?:that\s+)?(?:i|we)\s+(?:already\s+)?(?:use|work\s+with|have)\b",

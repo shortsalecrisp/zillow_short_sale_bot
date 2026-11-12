@@ -4306,9 +4306,37 @@ def test_sms_closeout_reinforcement_and_keep_posted_courtesy_are_silent(monkeypa
     assert courtesy["preserve_existing_state"] is True
     assert courtesy["reply_text"] == ""
 
+    vivian = module._sms_fast_decision(
+        covered_row,
+        "But i will keep your number just in case and for the future!",
+    )
+    assert vivian["block_reply"] is True
+    assert vivian["preserve_existing_state"] is True
+    assert vivian["reply_text"] == ""
+
+    saved = module._sms_fast_decision(
+        covered_row,
+        "I'll save your contact for future listings.",
+    )
+    assert saved["block_reply"] is True
+    assert saved["reply_text"] == ""
+
     reopened = module._sms_fast_decision(covered_row, "What is your fee?")
     assert reopened["block_reply"] is False
     assert reopened["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+
+    question_with_courtesy = module._sms_fast_decision(
+        covered_row,
+        "I'll keep your number for the future. What is your fee?",
+    )
+    assert question_with_courtesy["block_reply"] is False
+    assert question_with_courtesy["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+
+    open_conversation = module._sms_fast_decision(
+        {},
+        "I'll keep your number just in case and for the future.",
+    )
+    assert open_conversation is None
 
 
 def test_sms_contract_not_short_sale_and_source_question_use_distinct_closeouts(monkeypatch):
