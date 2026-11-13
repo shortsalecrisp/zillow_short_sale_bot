@@ -1432,12 +1432,14 @@ function hasFirstPersonVoicemailGreeting(conversation: ElevenLabsConversation): 
     const firstPersonIntroduction = /^(?:(?:hi|hello|good (?:morning|afternoon|evening))[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}\b/.test(text);
     const leaveContactInstruction = /\b(?:please|kindly)?\s*leave\s+(?:me\s+)?(?:your\s+)?(?:name|number|phone number|contact information|details?|message)\b/.test(text);
     const emailInstruction = /\b(?:please\s+)?(?:email me|send me an email|contact me by email|reach me by email|send (?:the|your|that|this) (?:information|info|details?) (?:to|by) email)\b/.test(text);
+    const textInstruction = /\b(?:please\s+)?(?:text (?:me|us|this number|the number)|send (?:me|us) (?:a )?text(?: message)?)\b/.test(text);
     const unavailableOrReturnCue = /\b(?:sorry i missed your call|can't (?:answer|take) (?:the |your )?call|cannot (?:answer|take) (?:the |your )?call|away from (?:my )?phone|not available|i(?:'ll| will) (?:call|get) (?:you )?back|return your call|get back to you)\b/.test(text);
     const reachedGreeting = /^(?:(?:hi|hello)[, ]+)?you(?:'ve| have) reached\b/.test(text);
     const recordedSignoff = /\b(?:thanks|thank you|goodbye|have a (?:great|good|nice) day)\b[.! ]*$/.test(text);
     return firstPersonIntroduction && (
       (leaveContactInstruction && unavailableOrReturnCue) ||
-      (emailInstruction && (unavailableOrReturnCue || reachedGreeting || recordedSignoff))
+      (emailInstruction && (unavailableOrReturnCue || reachedGreeting || recordedSignoff)) ||
+      (textInstruction && unavailableOrReturnCue)
     );
   });
 }
@@ -1859,6 +1861,7 @@ export function hasLiveHumanGatekeeperEvidence(
   expectedFirstName = "",
 ): boolean {
   if (confirmedListingWithExplicitServiceDecline(conversation)) return false;
+  if (hasTargetIdentityAfterAutomatedScreening(conversation, expectedFirstName)) return false;
   const transcript = conversation.transcript ?? [];
   let lastScreeningIndex = -1;
   for (let index = 0; index < transcript.length; index += 1) {
@@ -2095,6 +2098,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
         continue;
       }
       const automatedContinuation = /\b(?:person (?:you called|you are calling|you're calling) (?:is|was) (?:not )?available|leave an additional message|can you tell me more about the details|checking with the person you called)\b/.test(text) ||
+        /\b(?:person|party) you(?:'re| are) (?:calling|trying to reach)\b.{0,45}\b(?:cannot|can't|could not|is not|isn't) (?:take|answer) (?:your |the )?call\b/.test(text) ||
         /\b(?:the )?call could not be connected\b/.test(text) ||
         /^(?:(?:as soon as possible|thank you|thanks|goodbye|good day|not available|please hold|one moment)[.!? ]*)+$/.test(text) ||
         /^(?:thank you|thanks|please hold|one moment|not available)[.!? ]*$/.test(text) ||

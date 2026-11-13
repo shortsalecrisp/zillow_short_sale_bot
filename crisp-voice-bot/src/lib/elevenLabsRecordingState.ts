@@ -85,7 +85,8 @@ function isAutomatedMessage(message: string): boolean {
 function isGoogleCallAssistContinuation(message: string): boolean {
   const text = normalizeText(message);
   return /\bchecking with the person you called\b/.test(text) ||
-    /\bcan you tell me more about the details\b/.test(text);
+    /\bcan you tell me more about the details\b/.test(text) ||
+    /\b(?:person|party) you(?:'re| are) (?:calling|trying to reach)\b.{0,45}\b(?:cannot|can't|could not|is not|isn't) (?:take|answer) (?:your |the )?call\b/.test(text);
 }
 
 function isCannedFragment(message: string): boolean {
