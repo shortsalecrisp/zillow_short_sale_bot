@@ -14,9 +14,9 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r19 confirmed-stage repair excludes earlier workflow and prompt cohorts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261111_r19");
-  assert.equal(cohort.startedAt, "2026-11-11T13:59:15.603Z");
+test("r20 target-pickup prompt excludes earlier workflow and prompt cohorts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261113_r20");
+  assert.equal(cohort.startedAt, "2026-11-13T14:16:09.687Z");
   for (const versionId of ["agtvrsn_6701m6qay8vje668rjwm2n0zv6rw", "agtvrsn_1901m6qayb4gemes8s9gsppz4d7w", "agtvrsn_7101m6kejb9xf0xbye478mxq0ddp", "agtvrsn_0201m6kejettftj8rr5mprm8grg8",
     "agtvrsn_7601m6q96zm5e1astf8q4314k3wt", "agtvrsn_1701m6q972srexdrxgcf1meegsmr",
     "agtvrsn_7101m6gse6zefeqsa481y18yxjr4", "agtvrsn_9101m6gsebm7fzk85t478vmj1kzc",

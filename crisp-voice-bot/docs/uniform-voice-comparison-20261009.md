@@ -1,6 +1,27 @@
 # Uniform Conversion Comparison
 
-Current revision is r19, verified at 2026-11-11T13:59:15.603Z (November 11 at 8:59:15 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r19.
+Current revision is r20, verified at 2026-11-13T14:16:09.687Z (November 13 at 9:16:09 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r20.
+
+## Approved Revision 20: Expected Target Pickup After Screening
+
+Yoni approved the Lorna screening repair. When the expected target explicitly identifies
+themself after an automated screener or hold, Maya asks only whether the property is their
+listing. She does not repeat her name, company, screener response, or full introduction.
+Unnamed and differently named new listeners retain the short identity-and-listing check.
+The prompt-only paired release preserved workflow, tools, audio, models, platform settings,
+phone bindings, WhatsApp settings, procedures, and the exact 50/50 allocation.
+
+- Cohort: `maya_uniform_lead_conversion_20261113_r20`.
+- Boundary: `2026-11-13T14:16:09.687Z`.
+- Policy: `maya-uniform-lead-conversion-20261113-r20`.
+- Flash: `agtvrsn_3801m7am801ne4qrqjbq6ceycgaz`.
+- v4: `agtvrsn_4501m7am82greh08e9t1ztdjfk37`.
+- Root prompt: `d09194078aa2a49ec6ab2e201b8725566c687a3bf83c08513406d67586e3bc30`.
+- Shared normalized body: `bc2e1de7b133c0a91458c30a3b019aa8c53c9b8367c4e608a17cd4cb515b8fdb`.
+- Workflow: `e41831433ac22e4c0fbcb4fb8d8cc03dd8723abb9f44526d3040f28bca8a74f3`.
+
+Provider receipt: Render one-off job `job-dbrhmudg1s2s738hke60`. No calls were placed;
+audio behavior was not re-auditioned because the release changed prompt text only.
 
 ## Approved Revision 19: Confirmed State And Missing Handoff
 
