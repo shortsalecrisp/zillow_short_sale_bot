@@ -2302,6 +2302,7 @@ function isOptOutSignal_(text) {
   const patterns = [
     /^stop[.!?]*$/,
     /^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+/,
+    /[.!?,;:\u2014-]\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$/,
     /^unsubscribe[.!?]*$/,
     /\b(?:stop|quit|end)\s+(?:texting|messaging|contacting|sms)\b/,
     /\b(?:don't|dont|do not)\s+(?:text|message|contact|sms)\b/,
@@ -2698,7 +2699,18 @@ function isExactClosedCountQuestion_(text) {
   const t = normalizeLanguageSignalText_(text);
   return /\bhow many\b.{0,65}\b(?:short sales?|deals?|files?|transactions?)\b.{0,55}\b(?:closed|completed|handled|done)\b/.test(t) ||
     /\bhow many\b.{0,30}\b(?:closed|completed)\b/.test(t) ||
+    /\bhow many\b.{0,20}\b(?:have|has|had|did|do)\s+(?:you|yoni|crisp|your team|the company)\s+(?:done|handled|closed|completed)\b/.test(t) ||
     /\b(?:number|count) of\b.{0,30}\b(?:closings|closed|deals|short sales)\b/.test(t);
+}
+
+function getVerifiedClosedCount_() {
+  const raw = String(PropertiesService.getScriptProperties().getProperty("VERIFIED_CLOSED_COUNT") || "").trim();
+  return /^\d{1,6}$/.test(raw) && Number(raw) > 0 ? Number(raw) : 0;
+}
+
+function buildClosedCountReply_(verifiedCount) {
+  if (verifiedCount) return "I've completed " + verifiedCount + " short sales.";
+  return "I don't have a verified closed count to quote, so I don't want to guess. I've handled short sales for over 15 years and can confirm the current figure.";
 }
 
 function buildInfoRequestDecisionV4_(text, rowObj) {
@@ -2880,7 +2892,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     website: isWebsiteReviewsRequestSignal_(t),
     contact_card: isContactCardRequestSignal_(t),
     contact_info: isPlainContactInfoRequestSignal_(t) && !isContactCardRequestSignal_(t),
-    experience: isExperienceTrackRecordQuestionSignal_(t) || isExactClosedCountQuestion_(t),
+    experience: isExperienceTrackRecordQuestionSignal_(t),
     exact_count: isExactClosedCountQuestion_(t),
     timeline: isShortSaleTimelineQuestionSignal_(t),
     number: isCurrentTextingNumberQuestionSignal_(t),
@@ -3043,6 +3055,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   }
 
   const answers = [];
+  const verifiedClosedCount = flags.exact_count ? getVerifiedClosedCount_() : 0;
   let feeCapBypass = false;
   if (flags.equator) answers.push(buildEquatorPortalReply_());
   if (flags.documents) answers.push("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.");
@@ -3060,7 +3073,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     feeCapBypass = feeDecision.bypass_reply_cap ||
       shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadStatus, done);
   }
-  if (flags.experience) answers.push(buildExperienceReplyForQuestion_(t));
+  if (flags.experience && !flags.exact_count) answers.push(buildExperienceReplyForQuestion_(t));
   if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
   if (flags.website) answers.push("My website is https://www.crispshortsales.com.");
   if (flags.contact_card) answers.push(buildYoniContactCardReply_());
@@ -3075,22 +3088,22 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.fee_disclosure) answers.push(buildBuyerFeeDisclosureReply_());
   if (flags.failed_provider) answers.push(buildFailedProviderReply_());
   if (flags.differentiation) answers.push(buildDifferentiationQuestionReply_(t));
-  if (flags.exact_count) answers.push("I don't have a verified closed count to quote here; I'll need to confirm that number.");
+  if (flags.exact_count) answers.push(buildClosedCountReply_(verifiedClosedCount));
 
   return withNewCallHandoff_({
     matched: true,
     reply_text: answers.join(" "),
     lead_status: flags.differentiation ? "Y" : leadStatus,
     conversation_done: flags.differentiation ? false : done,
-    handoff_needed: !!flags.exact_count,
+    handoff_needed: !!flags.exact_count && !verifiedClosedCount,
     alert_needed: !!flags.differentiation,
-    send_reply_before_handoff: !!flags.exact_count || !!flags.differentiation,
-    handoff_type: flags.exact_count ? "STATS QUESTION" :
+    send_reply_before_handoff: (!!flags.exact_count && !verifiedClosedCount) || !!flags.differentiation,
+    handoff_type: flags.exact_count && !verifiedClosedCount ? "STATS QUESTION" :
       (flags.differentiation ? "HOT LEAD - DIFFERENTIATION QUESTION" : ""),
     bypass_reply_cap: !flags.exact_count && (flags.equator || feeCapBypass),
     needs_review: false,
     block_reply: false,
-    reason: flags.exact_count ? "Answered supported questions; owner must verify exact closed count" : "Answered all bounded supported questions in one message"
+    reason: flags.exact_count ? (verifiedClosedCount ? "Answered exact closed count from verified configuration" : "Answered supported questions; owner must verify exact closed count") : "Answered all bounded supported questions in one message"
   }, t, receivedAt);
 }
 

@@ -35,7 +35,10 @@ DISCLOSURE_REPLY = (
     "You'll want to disclose the fee to the buyer up front in the listing, so they can take that extra cost "
     "into account when deciding their offer price."
 )
-COUNT_ADMISSION = "I don't have a verified closed count to quote here; I'll need to confirm that number."
+COUNT_ADMISSION = (
+    "I don't have a verified closed count to quote, so I don't want to guess. "
+    "I've handled short sales for over 15 years and can confirm the current figure."
+)
 
 
 @pytest.fixture
@@ -434,6 +437,14 @@ def test_experience_exact_copy(chatbot):
     assert result["response_id"] == "experience"
 
 
+def test_anaphoric_completed_count_uses_candid_answer_first_handoff(chatbot):
+    result = chatbot.receive("Sounds interesting. How many have you done?")
+    assert result["should_reply"] is True
+    assert result["reply_text"] == COUNT_ADMISSION
+    assert result["handoff_needed"] is True
+    assert result["handoff_type"] == "STATS QUESTION"
+
+
 def test_ordinary_lender_timeline_is_not_closed_count_or_urgent_auction(chatbot):
     result = chatbot.receive("How many days does lender approval take for short sales?")
     assert result["reply_text"] == chatbot.module.SHORT_SALE_TIMELINE_REPLY
@@ -572,6 +583,14 @@ def test_buyer_provision_does_not_assume_acceptance(chatbot):
 
 def test_opt_out_overrides_fee_and_portal(chatbot):
     result = chatbot.receive("Stop texting me. What is your fee on Equator?")
+    assert result["lead_status"] == "R"
+    assert result["conversation_done"] is True
+    assert result["should_reply"] is False
+    assert result["handoff_needed"] is False
+
+
+def test_trailing_standalone_stop_overrides_self_handler_decline(chatbot):
+    result = chatbot.receive("Thanks for inquiring but I'm going to work this deal on my own. Stop")
     assert result["lead_status"] == "R"
     assert result["conversation_done"] is True
     assert result["should_reply"] is False

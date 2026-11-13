@@ -4796,7 +4796,15 @@ SMS_EXPERIENCE_REPLY = (
     "I've been handling short sales for over 15 years, and this is all I do: help agents and homeowners "
     "through the process. I'd be happy to talk through your listing and explain how I can help."
 )
-SMS_CLOSED_COUNT_REPLY = "I don't have a verified closed count to quote here; I'll need to confirm that number."
+SMS_CLOSED_COUNT_REPLY = (
+    "I don't have a verified closed count to quote, so I don't want to guess. "
+    "I've handled short sales for over 15 years and can confirm the current figure."
+)
+SMS_VERIFIED_CLOSED_COUNT = (
+    int(os.getenv("SMS_VERIFIED_CLOSED_COUNT", "0"))
+    if os.getenv("SMS_VERIFIED_CLOSED_COUNT", "0").isdigit()
+    else 0
+)
 SMS_EMAIL_ADDRESS_REQUEST_REPLY = "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
 SMS_BUYER_PROVISION_REPLY = (
     "No, I don't bring the buyer. I specialize in short-sale processing, handling the lender paperwork, "
@@ -5080,7 +5088,9 @@ def _sms_is_exact_closed_count_question(value: Any) -> bool:
     return bool(re.search(
         r"\b(?:how many|number of|exact count|closed count)\b(?!\s+(?:years|days|weeks|months)\b).{0,100}"
         r"\b(?:short sales?|deals?|files?|transactions?|closings?)\b"
-        r"|\bhow many\b(?!\s+(?:years|days|weeks|months)\b).{0,70}\b(?:closed|completed)\b",
+        r"|\bhow many\b(?!\s+(?:years|days|weeks|months)\b).{0,70}\b(?:closed|completed)\b"
+        r"|\bhow many\b.{0,20}\b(?:have|has|had|did|do)\s+(?:you|yoni|crisp|your team|the company)"
+        r"\s+(?:done|handled|closed|completed)\b",
         text,
     ))
 
@@ -6381,6 +6391,7 @@ def _sms_is_opt_out(value: Any) -> bool:
     patterns = [
         r"^stop[.!?]*$",
         r"^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+",
+        r"[.!?,;:\u2014-]\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$",
         r"^unsubscribe[.!?]*$",
         r"\b(?:stop|quit|end)\s+(?:texting|messaging|contacting|sms)\b",
         r"\b(?:don't|dont|do not)\s+(?:text|message|contact|sms)\b",
@@ -7905,7 +7916,10 @@ def _sms_question_priority_decision(
             "or email me at yoni@crispshortsales.com."
         ),
         "experience": SMS_EXPERIENCE_REPLY,
-        "closed_count": SMS_CLOSED_COUNT_REPLY,
+        "closed_count": (
+            f"I've completed {SMS_VERIFIED_CLOSED_COUNT} short sales."
+            if SMS_VERIFIED_CLOSED_COUNT > 0 else SMS_CLOSED_COUNT_REPLY
+        ),
         "timeline": SHORT_SALE_TIMELINE_REPLY,
         "number": "Yes, this number is great - call or text anytime. Thanks!",
         "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
@@ -7925,14 +7939,18 @@ def _sms_question_priority_decision(
         replies["documents"] = "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up."
         if flags["experience"] and flags["closed_count"]:
             replies["experience"] = SMS_EXPERIENCE_REPLY.split(" I'd be happy")[0]
-    answers = [replies[key] for key in matched if key != "closed_count" and replies.get(key)]
+    answers = [
+        replies[key] for key in matched
+        if key != "closed_count" and not (flags["closed_count"] and key == "experience") and replies.get(key)
+    ]
     if flags["fee"] and flags["timeline"] and _sms_is_fee_amount_question(inbound_text):
         fee_index = next((index for index, answer in enumerate(answers) if answer == replies["fee"]), -1)
         if fee_index >= 0:
             answers.insert(fee_index + 1, "The fee does not increase if the short-sale negotiation takes longer.")
     if flags["closed_count"]:
-        answers.append(SMS_CLOSED_COUNT_REPLY)
-    handoff = flags["closed_count"] or requests_call or call_now or flags["different"] or (flags["fee"] and interested)
+        answers.append(replies["closed_count"])
+    unverified_closed_count = flags["closed_count"] and SMS_VERIFIED_CLOSED_COUNT <= 0
+    handoff = unverified_closed_count or requests_call or call_now or flags["different"] or (flags["fee"] and interested)
     callback = _sms_complete_callback_reference(inbound_text, received_at) if requests_call else ""
     result = _sms_decision(
         reply_text=" ".join(answers),
@@ -7941,7 +7959,7 @@ def _sms_question_priority_decision(
         handoff_needed=handoff,
         send_reply_before_handoff=handoff,
         alert_needed=flags["different"],
-        handoff_type=("STATS QUESTION" if flags["closed_count"] else (
+        handoff_type=("STATS QUESTION" if unverified_closed_count else (
             "SCHEDULED CALLBACK" if callback else (
                 "HOT LEAD - DIFFERENTIATION QUESTION" if flags["different"] else (
                     "HOT LEAD - FEE AND CALL INTEREST" if flags["fee"] else "CALL REQUESTED"
@@ -7960,7 +7978,8 @@ def _sms_question_priority_decision(
             ))
         ),
         response_id=_sms_response_id_for_text(" ".join(answers)),
-        reason="Answered supported questions; unverified closed count needs confirmation" if flags["closed_count"]
+        reason=("Answered exact closed count from verified configuration" if SMS_VERIFIED_CLOSED_COUNT > 0
+                else "Answered supported questions; unverified closed count needs confirmation") if flags["closed_count"]
         else (f"Answered a bounded {'two' if len(matched) == 2 else 'multi'}-question inbound message" if len(matched) > 1
               else f"Answered {'differentiation' if matched[0] == 'different' else matched[0]} question before generic coverage language"),
     )

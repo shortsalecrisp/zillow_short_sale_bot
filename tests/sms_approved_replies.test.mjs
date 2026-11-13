@@ -444,6 +444,25 @@ test('verified tenure + unknown recent count gets answer and named handoff', () 
   assert.equal(h.effects[0].reason, 'STATS QUESTION');
 });
 
+test('anaphoric completed-count question gets a candid answer-first handoff', () => {
+  const {h, r} = answer('Sounds interesting. How many have you done?');
+  assert.equal(r.should_reply, true);
+  assert.match(r.reply_text, /don't have a verified closed count/i);
+  assert.match(r.reply_text, /over 15 years/i);
+  assert.match(r.reply_text, /confirm the current figure/i);
+  assert.equal(r.handoff_needed, true);
+  assert.equal(h.effects[0].reason, 'STATS QUESTION');
+});
+
+test('configured verified completed count answers directly without takeover', () => {
+  const h = smsHarness();
+  h.evaluate('PropertiesService.getScriptProperties().setProperty("VERIFIED_CLOSED_COUNT", "247")');
+  const r = h.incoming('How many have you done?');
+  assert.equal(r.reply_text, "I've completed 247 short sales.");
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.effects.length, 0);
+});
+
 test('fee plus requested call may answer once, but never reopens old handoff', () => {
   const {h, r} = answer('What is your fee? Please call me tomorrow at 3 pm ET.');
   assert.equal(r.should_reply, true);
@@ -681,6 +700,14 @@ test('opt out remains silent and immediate', () => {
   const {r} = answer('Please remove me from your database');
   assert.equal(r.should_reply, false);
   assert.equal(r.lead_status, 'R');
+});
+
+test('standalone trailing stop dominates an earlier self-handler decline', () => {
+  const {r} = answer("Thanks for inquiring but I'm going to work this deal on my own. Stop");
+  assert.equal(r.should_reply, false);
+  assert.equal(r.lead_status, 'R');
+  assert.equal(r.conversation_done, true);
+  assert.equal(r.handoff_needed, false);
 });
 
 test('an unmonitored inbox phone-menu notice is silent and never becomes a lead handoff', () => {

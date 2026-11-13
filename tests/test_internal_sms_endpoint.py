@@ -48,7 +48,10 @@ APPROVED_EXPERIENCE_REPLY = (
     "I've been handling short sales for over 15 years, and this is all I do: help agents and homeowners "
     "through the process. I'd be happy to talk through your listing and explain how I can help."
 )
-APPROVED_CLOSED_COUNT_ADMISSION = "I don't have a verified closed count to quote here; I'll need to confirm that number."
+APPROVED_CLOSED_COUNT_ADMISSION = (
+    "I don't have a verified closed count to quote, so I don't want to guess. "
+    "I've handled short sales for over 15 years and can confirm the current figure."
+)
 APPROVED_BUYER_COST_REPLY = (
     "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
     "to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?"
@@ -2547,7 +2550,11 @@ def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch
         sender_result=FakeSendResult(success=True),
     )
 
-    for inbound in ["Stop. Already have a company.", "Please remove my info"]:
+    for inbound in [
+        "Stop. Already have a company.",
+        "Please remove my info",
+        "Thanks for inquiring but I'm going to work this deal on my own. Stop",
+    ]:
         decision = module._sms_fast_decision({}, inbound)
         assert decision["lead_status"] == "R"
         assert decision["conversation_done"] is True
@@ -2555,6 +2562,7 @@ def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch
         assert decision["reply_text"] == ""
 
     assert module._sms_is_opt_out("Please stop by the office tomorrow") is False
+    assert module._sms_is_opt_out("We need to stop foreclosure tomorrow") is False
 
 
 def test_sms_client_consultation_stays_active_and_gets_acknowledgement(monkeypatch):
@@ -2641,7 +2649,7 @@ def test_sms_fee_and_recent_closing_count_answer_known_facts_before_handoff(monk
     assert decision["send_reply_before_handoff"] is True
     assert decision["bypass_reply_cap"] is False
     assert decision["response_id"] == "fee_specific"
-    assert "15 years" not in decision["reply_text"]
+    assert "15 years" in decision["reply_text"]
     assert "confident I can get your deal closed" not in decision["reply_text"]
     assert module._sms_should_reply(decision, 2) is True
     assert module._sms_should_reply(decision, 3) is False
@@ -2685,9 +2693,20 @@ def test_sms_experience_questions_share_the_approved_response(monkeypatch):
     assert count["handoff_type"] == "STATS QUESTION"
     assert count["send_reply_before_handoff"] is True
     assert count["response_id"] != "experience"
-    assert "15 years" not in count["reply_text"]
+    assert "15 years" in count["reply_text"]
     assert module._sms_should_reply(count, 2) is True
     assert module._sms_should_reply(count, 3) is False
+
+    anaphoric = module._sms_fast_decision({}, "Sounds interesting. How many have you done?")
+    assert anaphoric["reply_text"] == APPROVED_CLOSED_COUNT_ADMISSION
+    assert anaphoric["handoff_needed"] is True
+    assert anaphoric["handoff_type"] == "STATS QUESTION"
+
+    monkeypatch.setattr(module, "SMS_VERIFIED_CLOSED_COUNT", 247)
+    configured = module._sms_fast_decision({}, "How many have you done?")
+    assert configured["reply_text"] == "I've completed 247 short sales."
+    assert configured["handoff_needed"] is False
+    assert configured["handoff_type"] == ""
 
 
 def test_sms_unanswered_substantive_question_fails_closed_to_handoff(monkeypatch):
