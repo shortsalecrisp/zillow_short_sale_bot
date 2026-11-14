@@ -227,8 +227,12 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     const exactListingQuestion = /\bis .{1,120} your listing\?/.test(lastQuestion);
     const identityAnswer = /^(?:yes|yeah|yep|speaking|this is (?:he|she)|i am)[.!?]*$/.test(text) &&
       simpleIdentityQuestion && !/\band\b|\b(?:handling|want|help|may i|can i)\b/.test(lastQuestion);
-    const contextualListingAnswer = /^(?:it is|that is|it'?s mine|that'?s mine)[.!?]*$/.test(text) &&
-      exactListingQuestion;
+    const sameTurnListingAffirmativeRefusal =
+      /^(?:it is|that is|it'?s mine|that'?s mine)(?:[.!?,;:-]+\s*|\s+but\s+)(?:but\s+)?(?:i|we)\b/.test(text) &&
+      /\b(?:(?:do not|don't) need (?:any )?(?:help|assistance)|(?:am|'m|are|'re) not interested|already (?:have help|have someone|working with)|(?:am|'m|are|'re) (?:all set|covered|good))\b/.test(text);
+    const contextualListingAnswer = exactListingQuestion && (
+      /^(?:it is|that is|it'?s mine|that'?s mine)[.!?]*$/.test(text) || sameTurnListingAffirmativeRefusal
+    );
     const ambiguousListingAnswer = /^(?:maybe|possibly|perhaps|i think so|not sure|i'm not sure|i am not sure)[.!?]*$/.test(text) &&
       exactListingQuestion;
     const directHumanQuestion = /\b(?:who is this|why are you calling|what (?:is this|are you calling) about|can you hear me|i can't hear you)\b/.test(text);

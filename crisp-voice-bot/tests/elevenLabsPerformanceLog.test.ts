@@ -701,6 +701,43 @@ test("a contextual it is after the exact listing question confirms the target ag
   assert.equal(result.flags.targetAgentAnswered, true);
 });
 
+test("a contextual listing affirmative followed by a same-turn refusal confirms the target agent", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Stefanie Johnson" }, conversation: { transcript: [
+    { role: "user", message: "This is Stephanie." },
+    { role: "agent", message: "Is 207 Stevens Street your listing?" },
+    { role: "user", message: "It is, but I don't need any help. Thank you for reaching out. Goodbye." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "target_agent");
+  assert.equal(result.contactEvidence.reviewBucket, "target_live");
+  assert.equal(result.flags.targetAgentAnswered, true);
+  assert.equal(result.flags.liveTransferRequested, false);
+  assert.equal(result.flags.callbackRequested, false);
+});
+
+test("same-turn refusals do not make contextual affirmatives target evidence after other questions", async () => {
+  for (const question of [
+    "Is this a good time?",
+    "Would help with lender paperwork or calls be useful for this listing?",
+    "Is 207 Stevens Street still active?",
+  ]) {
+    const result = await measurementLog({ metadata: { fullName: "Stefanie Johnson" }, conversation: { transcript: [
+      { role: "user", message: "Hello." },
+      { role: "agent", message: question },
+      { role: "user", message: "It is, but I don't need any help." },
+    ] } });
+    assert.notEqual(result.flags.targetAgentAnswered, true, question);
+  }
+});
+
+test("a negative listing correction is not an affirmative prefix", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Stefanie Johnson" }, conversation: { transcript: [
+    { role: "user", message: "Hello." },
+    { role: "agent", message: "Is 207 Stevens Street your listing?" },
+    { role: "user", message: "It is not my listing, and I don't need help." },
+  ] } });
+  assert.notEqual(result.flags.targetAgentAnswered, true);
+});
+
 test("a target saying their name followed by speaking is target-live evidence", async () => {
   const result = await measurementLog({ metadata: { fullName: "Diana Cardona Castro" }, conversation: { transcript: [
     { role: "user", message: "Diana speaking." },
