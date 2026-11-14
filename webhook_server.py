@@ -8069,6 +8069,21 @@ def _sms_fast_decision(
         )
 
     last_outbound = _sms_normalize_whitespace(row_obj.get("last_outbound_text")).lower()
+    if (
+        re.fullmatch(r"(?:no[, ]+)?(?:it is not|it isn't|it's not)[.! ]*", t)
+        and re.search(r"\blisted as a short sale\b", last_outbound)
+        and re.search(
+            r"\bare you handling the lender side yourself,? or do you already have help\??",
+            last_outbound,
+        )
+    ):
+        return _sms_decision(
+            reply_text="Do you mean the listing isn't a short sale?",
+            lead_status="Y",
+            conversation_done=False,
+            handoff_needed=False,
+            reason="Clarified anaphoric correction to the initial short-sale listing assertion",
+        )
     if (re.fullmatch(r"(?:thanks[ ,!]+(?:yoni[ ,!]+)?)?(?:yes|yeah|yep|i do)[.! ]*", t)
             and re.search(r"are you handling the lender side yourself,? or do you already have help\??", last_outbound)):
         return _sms_decision(reply_text="Do you mean you're handling it yourself, or you already have help?",

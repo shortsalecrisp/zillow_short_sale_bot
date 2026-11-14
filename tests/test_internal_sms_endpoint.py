@@ -3850,6 +3850,38 @@ def test_nov2_conversation_regressions(monkeypatch):
     assert module._sms_fast_decision({}, "STOP")['block_reply'] is True
 
 
+@pytest.mark.parametrize("inbound", ["No it's not", "No it isn't.", "It is not"])
+def test_initial_opener_anaphoric_short_sale_correction_is_clarified(monkeypatch, inbound):
+    module, _, _ = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    opener = (
+        "Hey Sarah, this is Yoni Kutler with Crisp Short Sales. "
+        "I saw 123 Main St listed as a short sale. "
+        "Are you handling the lender side yourself, or do you already have help?"
+    )
+    decision = module._sms_fast_decision({"last_outbound_text": opener}, inbound)
+    assert decision["reply_text"] == "Do you mean the listing isn't a short sale?"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+
+
+def test_anaphoric_short_sale_correction_guard_is_conservative(monkeypatch):
+    module, _, _ = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    opener = (
+        "Hey Sarah, this is Yoni Kutler with Crisp Short Sales. "
+        "I saw 123 Main St listed as a short sale. "
+        "Are you handling the lender side yourself, or do you already have help?"
+    )
+    explicit = module._sms_fast_decision({"last_outbound_text": opener}, "It's not a short sale")
+    assert "thanks for letting me know" in explicit["reply_text"].lower()
+    assert explicit["conversation_done"] is True
+
+    later = module._sms_fast_decision({"last_outbound_text": "Is that still correct?"}, "No it's not")
+    assert later is None or later["reply_text"] != "Do you mean the listing isn't a short sale?"
+
+    bare_no = module._sms_fast_decision({"last_outbound_text": opener}, "No")
+    assert bare_no is None or bare_no["reply_text"] != "Do you mean the listing isn't a short sale?"
+
+
 def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followup(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

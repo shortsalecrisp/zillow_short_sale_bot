@@ -2,6 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {smsHarness} from './helpers/sms_core_harness.mjs';
 
+test('initial-opener anaphoric correction asks which assertion was denied', () => {
+  const opener = "Hey Sarah, this is Yoni Kutler with Crisp Short Sales. I saw 123 Main St listed as a short sale. I can take the lender paperwork, calls, and follow-up off your plate. There's no service fee to you or the seller; my fee is buyer-paid at closing. Are you handling the lender side yourself, or do you already have help?";
+  for (const inbound of ["No it's not", "No it isn't.", "It is not"]) {
+    const result = smsHarness({last_outbound_text: opener}).incoming(inbound);
+    assert.equal(result.reply_text, "Do you mean the listing isn't a short sale?", inbound);
+    assert.equal(result.conversation_done, false, inbound);
+    assert.equal(result.handoff_needed, false, inbound);
+  }
+
+  const explicit = smsHarness({last_outbound_text: opener}).incoming("It's not a short sale");
+  assert.match(explicit.reply_text, /thanks for letting me know/i);
+  assert.equal(explicit.conversation_done, true);
+
+  const laterHarness = smsHarness({last_outbound_text: 'Is that still correct?'});
+  assert.equal(laterHarness.evaluate(`buildAmbiguousShortSaleCorrectionDecision_("No it's not", state)`), null);
+
+  const bareNoHarness = smsHarness({last_outbound_text: opener});
+  assert.equal(bareNoHarness.evaluate(`buildAmbiguousShortSaleCorrectionDecision_('No', state)`), null);
+});
+
 const answer = (text, row = {}, options = {}) => {
   const h = smsHarness(row, options);
   return {h, r: h.incoming(text)};

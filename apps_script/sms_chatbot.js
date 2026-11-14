@@ -2726,6 +2726,19 @@ function buildInfoRequestDecisionV4_(text, rowObj) {
     reason: targetEmail ? "Agent requested information; email sent before SMS acknowledgement" : "Agent requested information; collecting email address"};
 }
 
+function buildAmbiguousShortSaleCorrectionDecision_(text, rowObj) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase())
+    .replace(/[\u2018\u2019]/g, "'");
+  if (!/^(?:no[, ]+)?(?:it is not|it isn't|it's not)[.! ]*$/.test(t)) return null;
+  const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || "")).toLowerCase();
+  if (!/\blisted as a short sale\b/.test(lastOutbound) ||
+      !/\bare you handling the lender side yourself,? or do you already have help\??/.test(lastOutbound)) return null;
+  return {matched: true,
+    reply_text: "Do you mean the listing isn't a short sale?",
+    lead_status: "Y", conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false,
+    reason: "Clarified anaphoric correction to the initial short-sale listing assertion"};
+}
+
 function buildTerminalCoverageDecisionV4_(text, rowObj) {
   const t = withoutNegatedRejection_(text);
   if (isShortSaleSourceQuestion_(t) || isEmailRequestSignal_(t) || extractEmailAddress_(t) ||
@@ -3204,6 +3217,9 @@ function applyFastRules_(text, rowObj, receivedAt) {
 
   const compoundDecline = buildCompoundCoverageDeclinePrecedenceDecision_(t);
   if (compoundDecline) return compoundDecline;
+
+  const ambiguousShortSaleCorrection = buildAmbiguousShortSaleCorrectionDecision_(t, rowObj);
+  if (ambiguousShortSaleCorrection) return ambiguousShortSaleCorrection;
 
   if (isBuyerSideProcessingInterestSignal_(t)) {
     return buildManualHandoffDecision_(
