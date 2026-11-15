@@ -7866,7 +7866,10 @@ def _sms_question_priority_decision(
             r"what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|"
             r"willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text,
         )),
-        "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in|local to)\b", text)),
+        "local": bool(re.search(
+            r"\b(?:are you local|where are you located|where r u located|where are you based|based in|local to)\b"
+            r"|\b(?:do|can|could|will|would)\s+(?:you|u)\s+(?:(?:also|still)\s+)?(?:service|serve|cover|work in)\s+(?:the state of\s+)?(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|dc|al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|nationwide|all states)\b", text,
+        )),
         "company": _sms_is_company_identity_question(text),
         "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?|check out your company)\b", text)),
         "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),

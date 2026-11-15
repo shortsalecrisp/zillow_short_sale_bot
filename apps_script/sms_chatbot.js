@@ -5154,6 +5154,7 @@ function isListingPromotionRequestSignal_(text) {
 function isLocalQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
+    /\b(?:do|can|could|will|would)\s+(?:you|u)\s+(?:(?:also|still)\s+)?(?:service|serve|cover|work in)\s+(?:the state of\s+)?(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|dc|al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|nationwide|all states)\b/,
     /\bare\s+(?:you|u)\s+local\b/,
     /\bare\s+(?:you|u)\s+(?:located|based)\s+(?:in|near|around|out of)\b/,
     /\bwhere\s+are\s+(?:you|u)\s+(?:located|based)\b/,
