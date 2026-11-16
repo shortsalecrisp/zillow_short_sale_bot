@@ -41,7 +41,11 @@ export function comparisonPlatformSettings(settings) {
 
 export function comparisonWorkflow(workflow) {
   const result = structuredClone(workflow);
-  const edges = result && typeof result === 'object' && !Array.isArray(result) ? result.edges : undefined;
+  // Reconcile only the provider's numeric GET-only workflow schema marker.
+  if (isObject(result) && Object.hasOwn(result, 'version') && result.version === 1) {
+    delete result.version;
+  }
+  const edges = isObject(result) ? result.edges : undefined;
   // Reconcile only the provider's empty GET-only edge rerouting default.
   if (edges && typeof edges === 'object' && !Array.isArray(edges)) {
     for (const edge of Object.values(edges)) {

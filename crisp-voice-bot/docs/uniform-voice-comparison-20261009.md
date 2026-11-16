@@ -23,6 +23,23 @@ phone bindings, WhatsApp settings, procedures, and the exact 50/50 allocation.
 Provider receipt: Render one-off job `job-dbrhmudg1s2s738hke60`. No calls were placed;
 audio behavior was not re-auditioned because the release changed prompt text only.
 
+## Approved r20 Validator-Only Workflow Version Default, November 16
+
+Both exact r20 provider GET responses gained an own numeric `workflow.version: 1` without a
+branch, version, prompt, workflow, allocation, or protected-setting release. Yoni approved
+reconciling only that direct GET-response schema marker. The workflow normalizer deep-clones
+the response and removes `version` only when the direct workflow is a non-array object, the
+property is own, and its value is strictly numeric `1`. Absence stays absent. String `"1"`,
+other numbers, null, booleans, arrays, objects, nested versions, edge versions, malformed
+workflows, and every unrelated field remain visible and fail the pinned digest.
+
+The executable verifier remains read-only and still performs exactly three provider GETs.
+It requires the exact r20 agent, branches, versions, TTS models, canonical shared/workflow
+hashes, protected settings, direct normalized-body equality, and complete native 50/50 split.
+The separate waiting-audio GET remains independently pinned. This reconciliation makes no
+provider write, call, prompt or voice change, cohort reset, or historical sample admission.
+Earlier cohorts remain separate, and r20 retains its original boundary and review gates.
+
 ## Approved Revision 19: Confirmed State And Missing Handoff
 
 Yoni approved the Janese, Tami and Glenn repairs and a monitor-only pin update. The paired

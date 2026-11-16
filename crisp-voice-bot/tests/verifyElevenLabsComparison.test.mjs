@@ -109,6 +109,34 @@ test('only own empty reroutes arrays on direct workflow edge objects are reconci
   assert.equal(comparisonWorkflow(undefined), undefined);
 });
 
+test('only an own numeric direct workflow version equal to 1 is reconciled', () => {
+  const agents = [fixture(), fixture(1)];
+  const pinned = { ...expected, sharedHash: digest(comparisonBody(agents[0])), workflowHash: digest(agents[0].workflow) };
+  const fresh = structuredClone(agents);
+  for (const agent of fresh) agent.workflow.version = 1;
+  const before = JSON.stringify(fresh);
+  assert.equal(validateComparison(fresh, allocation(), pinned).ok, true);
+  assert.deepEqual(comparisonWorkflow(fresh[0].workflow), agents[0].workflow);
+  assert.equal(JSON.stringify(fresh), before);
+  for (const value of [null, false, 0, 2, '1', '', [], {}, { configured: 1 }]) {
+    const changed = structuredClone(fresh); changed[0].workflow.version = value;
+    assert.throws(() => validateComparison(changed, allocation(), pinned), /configuration digest/);
+  }
+  for (const change of [
+    a => { delete a.workflow.version; a.workflow.nested = { version: 1 }; },
+    a => { delete a.workflow.version; a.workflow.edges[0].version = 1; },
+    a => { delete a.workflow.version; a.workflow.other_version = 1; },
+  ]) {
+    const changed = structuredClone(fresh); change(changed[0]);
+    assert.throws(() => validateComparison(changed, allocation(), pinned), /configuration digest/);
+  }
+  for (const value of [undefined, null, false, 0, 'workflow', []]) {
+    assert.deepEqual(comparisonWorkflow(value), value);
+  }
+  assert.deepEqual(comparisonWorkflow({ version: '1', edges: [] }), { version: '1', edges: [] });
+  assert.deepEqual(comparisonWorkflow({ nested: { version: 1 }, edges: [] }), { nested: { version: 1 }, edges: [] });
+});
+
 function disabledNoiseShape(agent) {
   const result = newShape(agent);
   result.conversation_config.turn.noisy_environment_detection = false;
