@@ -6,7 +6,7 @@ import test from "node:test";
 
 const source = fs.readFileSync(path.join(import.meta.dirname, "../apps_script/zz_unified_post.js"), "utf8");
 function fixture() {
-  const values = {}, rows = [], lock = { tryLock: () => true, releaseLock() {} };
+  const values = {}, rows = [], logs = [], lock = { tryLock: () => true, releaseLock() {} };
   let writes = 0, uuid = 0, failAppend = false;
   const sheet = {
     getLastRow: () => rows.length,
@@ -29,11 +29,15 @@ function fixture() {
     }) },
     getSmsSpreadsheet_: () => ({ getSheetByName: () => sheet, insertSheet: () => sheet }),
     maskSensitiveDebugText_: value => value,
+    writeSmsDiagnosticV37_(stage, data) {
+      if (failAppend) throw new Error("log unavailable");
+      logs.push({ stage, data });
+    },
   };
   for (const name of ["queueSendStartDiagnosticV35_", "flushSendStartDiagnosticsV35_"]) {
     vm.runInNewContext(source.match(new RegExp(`^function ${name}\\([\\s\\S]*?^}`, "m"))[0], context);
   }
-  return { context, values, rows, lock, writes: () => writes, failAppend: () => { failAppend = true; } };
+  return { context, values, rows, logs, lock, writes: () => writes, failAppend: () => { failAppend = true; } };
 }
 
 test("send-start diagnostic is durable without a Sheet call or credentials; existing monitor drains it", () => {
@@ -44,8 +48,9 @@ test("send-start diagnostic is durable without a Sheet call or credentials; exis
   assert.equal(Object.keys(h.values).length, 1);
   assert.doesNotMatch(JSON.stringify(h.values), /secret|private|reply_text/);
   assert.equal(h.context.flushSendStartDiagnosticsV35_(), 1);
-  assert.equal(h.rows[1][1], "send_started_result");
-  assert.equal(JSON.parse(h.rows[1][9]).status, "send_started");
+  assert.equal(h.logs[0].stage, "send_started_result");
+  assert.equal(h.logs[0].data.status, "send_started");
+  assert.equal(h.writes(), 0);
   assert.equal(Object.keys(h.values).length, 0);
   assert.equal(h.context.flushSendStartDiagnosticsV35_(), 0);
 });
@@ -58,6 +63,6 @@ test("busy diagnostic lock or failed append never drops the queued diagnostic", 
   assert.equal(Object.keys(h.values).length, 1);
   h.lock.tryLock = () => true;
   h.failAppend();
-  assert.throws(() => h.context.flushSendStartDiagnosticsV35_(), /append failed/);
+  assert.throws(() => h.context.flushSendStartDiagnosticsV35_(), /log unavailable/);
   assert.equal(Object.keys(h.values).length, 1);
 });

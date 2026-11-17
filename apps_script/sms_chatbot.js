@@ -7789,6 +7789,10 @@ function sendSystemAlertEmail_(subject, body) {
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
 
+  if (typeof isSmsStorageErrorV37_ === "function" && isSmsStorageErrorV37_(subject, body)) {
+    return sendCoalescedSmsStorageAlertV37_(body, toEmail);
+  }
+
   MailApp.sendEmail({
     to: toEmail,
     subject: subject,

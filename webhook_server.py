@@ -5672,29 +5672,10 @@ def _sms_get_or_create_ws(title: str, headers: List[str], rows: str = "1000", co
 
 def _sms_append_debug(stage: str, details: Optional[Dict[str, Any]] = None) -> None:
     try:
-        data = details or {}
-        ws = _sms_get_or_create_ws(
-            SMS_CHATBOT_DEBUG_TAB,
-            SMS_DEBUG_HEADERS,
-            rows="5000",
-            cols=str(len(SMS_DEBUG_HEADERS)),
-        )
-        row = [
-            datetime.now(timezone.utc).isoformat(),
-            stage or "",
-            str(data.get("request_id") or ""),
-            str(data.get("phone") or ""),
-            _sms_truncate(data.get("message") or "", 500),
-            str(data.get("should_reply") or ""),
-            _sms_truncate(data.get("reply_text") or "", 500),
-            _sms_truncate(data.get("reason") or "", 300),
-            str(data.get("lead_status") or ""),
-            _sms_truncate(_sms_json(_sms_mask_sensitive(data)), 3000),
-        ]
-        row = [sanitize_external_links_for_sheet(value) for value in row]
-        _retry_gspread_call(f"append {SMS_CHATBOT_DEBUG_TAB}", lambda: ws.append_row(row))
+        from sms_diagnostics import emit_sms_diagnostic
+        emit_sms_diagnostic(logger, stage, details)
     except Exception:
-        logger.exception("sms-chatbot: failed to append debug row stage=%s", stage)
+        logger.error("SMS_DIAGNOSTIC_UNAVAILABLE")
 
 
 def _sms_read_leads_sheet() -> Tuple[Any, List[str], List[List[str]]]:

@@ -812,6 +812,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
       new Date(), "queued", requestId, messageId, phone, replyText, metadata,
       "", new Date(), 0, "", "", "", "", "", "", "", crmRow, ""
     ]);
+    if (typeof noteSmsStorageWriteV37_ === "function") noteSmsStorageWriteV37_(requestId);
     return {
       ok: true,
       queued: true,
@@ -3666,6 +3667,7 @@ function getTaskerTransportHealthV12_(nowOverride) {
 
 function monitorTaskerTransportHealthV12_() {
   try { if (typeof flushSendStartDiagnosticsV35_ === "function") flushSendStartDiagnosticsV35_(); } catch (_) {}
+  try { flushSmsStorageRecoveryV37_(); } catch (_) {}
   try { monitorSmsClaimStorageV36_(); } catch (_) {}
   var health = getTaskerTransportHealthV12_();
   var props = PropertiesService.getScriptProperties();
