@@ -224,17 +224,19 @@ class Config:
 
 class GCSObjects:
     """Private object storage with compare-and-swap; no bucket creation or ACL edits."""
-    def __init__(self, bucket, credentials_json=None, session=None):
+    def __init__(self, bucket, credentials_json=None, session=None, *, read_only=False):
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]", bucket):
             raise ValueError("A private video storage bucket must be configured")
         self.bucket = bucket
+        self.read_only = read_only
         self._signing_credentials = None
         if session is None:
             from google.oauth2 import service_account
             from google.auth.transport.requests import AuthorizedSession
             info = json.loads(credentials_json or os.environ["GCP_SERVICE_ACCOUNT_JSON"])
             credentials = service_account.Credentials.from_service_account_info(
-                info, scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
+                info, scopes=["https://www.googleapis.com/auth/devstorage.read_only" if read_only
+                              else "https://www.googleapis.com/auth/devstorage.read_write"])
             session = AuthorizedSession(credentials)
             self._signing_credentials = credentials
         self.session = session
@@ -280,6 +282,8 @@ class GCSObjects:
         return data.content, version
 
     def write(self, key, body, version, content_type="application/json"):
+        if self.read_only:
+            raise ValueError("Diagnostic storage is read-only")
         response = self.session.post(
             "https://storage.googleapis.com/upload/storage/v1/b/" + self.bucket + "/o",
             params={"uploadType": "media", "name": "video-followup/" + key, "ifGenerationMatch": version},
@@ -290,6 +294,8 @@ class GCSObjects:
         return int(response.json()["generation"])
 
     def delete(self, key, version):
+        if self.read_only:
+            raise ValueError("Diagnostic storage is read-only")
         response = self.session.delete(self.url(key), params={"ifGenerationMatch": version}, timeout=20)
         if response.status_code not in {204, 404, 412}:
             response.raise_for_status()

@@ -9833,6 +9833,24 @@ async def internal_text_followup_policy(request: Request):
             "recovery_requires_pinned_episode": True, "sent": False}
 
 
+@app.get("/internal/video-followup-diagnostics")
+async def internal_video_followup_diagnostics(request: Request):
+    """Exact stored-job diagnostics; never process media, contact providers or send."""
+    _auth_internal_request(request)
+    from video_followup_diagnostics import snapshot, validate_keys
+    try:
+        keys = validate_keys(request.query_params.get("keys"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bounded_exact_job_keys_required")
+    try:
+        result = await asyncio.to_thread(snapshot, keys)
+        return Response(content=json.dumps(result), media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        logger.warning("VIDEO_DIAGNOSTICS_UNAVAILABLE error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="stored_video_diagnostics_unavailable")
+
+
 async def _evaluate_followup_recovery(request: Request, *, text_only=False):
     _auth_internal_request(request)
     try:
