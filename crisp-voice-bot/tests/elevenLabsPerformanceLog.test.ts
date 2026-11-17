@@ -881,6 +881,10 @@ test("callback tool fire, caller request, capture receipt and completion are dis
   assert.equal(captured.handoffEvidence.callbackTime, "tomorrow at four");
   assert.equal(captured.handoffEvidence.callbackCompleted, null);
   assert.equal(captured.handoffEvidence.positiveHandoffVerified, null);
+  conversation.transcript[4].tool_results![0].result_value = '{"requestCaptured":true,"callbackTime":"today at four o clock p m"}'.replace('o clock', "o'clock");
+  const spoken = await measurementLog({ conversation, callbackConsent: { callbackTime: "Today at 4:00 p.m" } });
+  assert.equal(spoken.handoffEvidence.callbackRequestCaptured, true);
+  conversation.transcript[4].tool_results![0].result_value = '{"requestCaptured":true,"queued":true,"callbackTime":"tomorrow at four"}';
   const corrected = await measurementLog({ conversation, callbackConsent: { callbackTime: "tomorrow at five" } });
   assert.equal(corrected.handoffEvidence.callbackRequestCaptured, false);
   const unfinished = await measurementLog({ conversation: { ...conversation, status: "in-progress" },

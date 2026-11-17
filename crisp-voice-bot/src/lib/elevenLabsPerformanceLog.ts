@@ -368,11 +368,18 @@ function readToolResult(toolResult: TranscriptToolResult): Record<string, unknow
   } catch { return null; }
 }
 
+function callbackTimingKey(value: string): string {
+  const hours = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  return normalizeText(value).replace(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/g,
+    word => String(hours.indexOf(word) + 1)).replace(/:00\b/g, "").replace(/\bo'clock\b/g, "")
+    .replace(/\./g, "").replace(/\b([ap])\s+m\b/g, "$1m").replace(/\s+/g, " ").trim();
+}
+
 function hasCapturedCallbackResult(transcript: PerformanceTranscriptItem[], requestedTime: string): boolean {
   return transcript.some((item) => (item.tool_results ?? []).some((result) => {
     const receipt = readToolResult(result);
     return result.tool_name === "callback_requested" && receipt?.requestCaptured === true &&
-      typeof receipt.callbackTime === "string" && normalizeText(receipt.callbackTime) === normalizeText(requestedTime);
+      typeof receipt.callbackTime === "string" && callbackTimingKey(receipt.callbackTime) === callbackTimingKey(requestedTime);
   }));
 }
 

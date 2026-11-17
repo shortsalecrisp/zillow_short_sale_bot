@@ -845,7 +845,25 @@ export function shouldTreatAsAlreadyHasShortSaleHelp(conversation: ElevenLabsCon
   );
 }
 
+export function hasTerminalNonleadPlayback(conversation: ElevenLabsConversation): boolean {
+  const turns = conversation.transcript ?? [];
+  const echoKey = (value: string) => normalizeText(value).replace(/[^a-z0-9]+/g, " ").trim();
+  const users = turns.filter(t => t.role === "user" && t.message && hasMeaningfulSpokenContent(t.message));
+  const menu = users.some(t => /\b(?:press|dial) (?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(t.message!));
+  const echoed = users.filter(t => normalizeText(t.message!).split(/\s+/).length >= 8 &&
+    turns.slice(0, turns.indexOf(t)).some(prior => ["agent", "assistant"].includes(prior.role ?? "") &&
+      echoKey(prior.message ?? "") === echoKey(t.message!)));
+  if (menu && echoed.length >= 2 && users.every(t => echoed.includes(t) ||
+      /\b(?:press|dial|recording|extension)\b/i.test(t.message!))) return true;
+  // Only an uninterrupted market-news monologue with no subsequent caller
+  // answer qualifies. A lead discussing financing must remain a live contact.
+  return users.length === 1 && users[0].message!.split(/\s+/).length >= 60 &&
+    /\bbasis points\b/i.test(users[0].message!) && /\b(?:crude|brent)\b/i.test(users[0].message!) &&
+    /\bnvidia\b/i.test(users[0].message!) && !/\b(?:my|our) (?:listing|short sale|property)\b/i.test(users[0].message!);
+}
+
 export function shouldTreatAsRecordingArtifact(conversation: ElevenLabsConversation): boolean {
+  if (hasTerminalNonleadPlayback(conversation)) return true;
   if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
     return false;
   }
@@ -1125,7 +1143,8 @@ async function persistDirectVoiceContactOutcome(
   directSheetUpdate: typeof updateVoiceLeadRow,
 ): Promise<void> {
   const fields = await directSheetUpdate(Number(payload.rowNumber), payload);
-  if (!fields.some((field) => field.endsWith(":callResult"))) {
+  if (!fields.some((field) => field.endsWith(":callResult") ||
+      (payload.voiceTerminalReceipt && field === "AP:voiceTerminalReceipt_verified"))) {
     throw new Error("Direct terminal voice outcome write was not acknowledged");
   }
 }
@@ -1140,7 +1159,7 @@ export async function persistVoiceContactOutcome(
   const directSheetUpdate = dependencies.directSheetUpdate ?? updateVoiceLeadRow;
   const appsScriptPost = dependencies.appsScriptPost ?? axios.post;
 
-  if (!config.googleAppsScript.webhookUrl) {
+  if (payload.voiceTerminalReceipt || !config.googleAppsScript.webhookUrl) {
     await persistDirectVoiceContactOutcome(payload, directSheetUpdate);
     return;
   }
@@ -1267,6 +1286,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
       if (next.role !== "user" || !liveMessages.has(next.message)) return false;
       const answer = normalizeText(next.message).replace(/^(?:(?:uh+|oh|n-)[, ]*)/, "");
+      if (/^(?:no[, ]+)?(?:we're|we are) all good(?: on (?:it|this|that|the file))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer)) return true;
       return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:['’]m| am) (?:(?:doing|handling) (?:everything|it|this|the file)|okay|ok|good|fine|all set)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
     }
     return false;
@@ -1510,7 +1530,7 @@ export function getAuthoritativeTerminalCallResult(
 
   const unresolvedPhoneMenu = isRecordingOrScreeningArtifact(conversation.transcript ?? []) &&
     userMessages(conversation).some(message => /\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(message));
-  if (unresolvedPhoneMenu && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
+  if ((unresolvedPhoneMenu || hasTerminalNonleadPlayback(conversation)) && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
     return "agent_not_available";
   }
   // A recorded screener can offer to take an additional message and thereby
@@ -1898,6 +1918,11 @@ export function hasLiveHumanGatekeeperEvidence(
       return undefined;
     }
     const message = normalizeText(item.message);
+    const assistantTo = message.match(/^(?:hi[, ]+)?this is ([a-z][a-z'-]*),? assistant to ([a-z][a-z'-]*)\b.{0,60}\bat (.{2,90})/);
+    if (assistantTo && expected && !nameSoundsSimilar(assistantTo[1], expected) &&
+        (nameSoundsSimilar(assistantTo[2], expected) || (assistantTo[2] === "ray" && expected === "raymond")) && brokeragePrefix(assistantTo[3])) {
+      return { index, responder: assistantTo[1] };
+    }
     const introduction = message.match(/^(?:thank you for calling\s+)?(.{2,90}?)[,.]\s*this is\s+([a-z][a-z'-]*)(?:[.!?, ]|$)/) ??
       message.match(/^this is\s+([a-z][a-z'-]*)\s+(?:with|at|from)\s+(.{2,90})$/);
     if (!introduction) return undefined;
