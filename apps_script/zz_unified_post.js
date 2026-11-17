@@ -600,36 +600,13 @@ function safeJsonStringify_(value) {
 
 function maskSensitiveDebugText_(value) {
   return String(value || "")
-    .replace(/(token=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/(\"token\"\s*:\s*\")[^\"]+(\")/gi, "$1[redacted]$2")
+    .replace(/((?:token|api[_-]?key|secret|password|signature|x-goog-signature)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(\"(?:token|api[_-]?key|secret|password|authorization|signature)\"\s*:\s*\")[^\"]*(\")/gi, "$1[redacted]$2")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer [redacted]");
 }
 
 function appendSmsDebugLog_(stage, data) {
-  data = data || {};
-  var ss = getSmsSpreadsheet_();
-  var sheet = ss.getSheetByName("sms_debug_log") || ss.insertSheet("sms_debug_log");
-  var headers = ["logged_at", "stage", "request_id", "phone", "message", "should_reply", "reply_text", "reason", "lead_status", "details_json"];
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(headers);
-  } else {
-    var existing = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
-    if (existing.join("|") !== headers.join("|")) {
-      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    }
-  }
-  sheet.appendRow([
-    new Date().toISOString(),
-    stage || "",
-    data.request_id || "",
-    data.phone || "",
-    data.message || "",
-    data.should_reply || "",
-    data.reply_text || "",
-    data.reason || "",
-    data.lead_status || "",
-    maskSensitiveDebugText_(safeJsonStringify_(data))
-  ]);
+  return writeSmsDiagnosticV37_(stage, data);
 }
 
 // Diagnostic Sheet appends can exceed the handset's 30-second HTTP deadline
@@ -667,17 +644,9 @@ function flushSendStartDiagnosticsV35_() {
       return [entry.logged_at, "send_started_result", data.request_id, data.phone || "",
         "", "", "", data.reason || "", "", maskSensitiveDebugText_(JSON.stringify(data))];
     });
-    var ss = getSmsSpreadsheet_();
-    var sheet = ss.getSheetByName("sms_debug_log") || ss.insertSheet("sms_debug_log");
-    var headers = ["logged_at", "stage", "request_id", "phone", "message", "should_reply", "reply_text", "reason", "lead_status", "details_json"];
-    if (!sheet.getLastRow()) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    else if (sheet.getRange(1, 1, 1, headers.length).getValues()[0].join("|") !== headers.join("|")) {
-      throw new Error("SMS diagnostic header changed; queued evidence retained");
-    }
-    // appendRow preserves unrelated concurrent debug appends. A failed append
-    // retains its property; diagnostic duplicates are safer than dropping it.
+    // Delete a queued diagnostic only after native logging accepts it.
     rows.forEach(function(row, index) {
-      sheet.appendRow(row);
+      writeSmsDiagnosticV37_(row[1], JSON.parse(row[9]));
       props.deleteProperty(keys[index]);
     });
     return keys.length;
