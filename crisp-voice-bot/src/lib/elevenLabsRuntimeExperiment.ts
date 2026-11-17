@@ -7,12 +7,12 @@ export const ELEVENLABS_TTS_CONTROL_BRANCH_ID = "agtbrch_1101kpkhs3b4eg5v0q8ppq4
 export const ELEVENLABS_TTS_TEST_BRANCH_ID = "agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv";
 
 export const ELEVENLABS_UNIFORM_COMPARISON = Object.freeze({
-  cohort: "maya_uniform_lead_conversion_20261113_r20",
-  startedAt: "2026-11-13T14:16:09.687Z",
-  controlVersionId: "agtvrsn_3801m7am801ne4qrqjbq6ceycgaz",
-  testVersionId: "agtvrsn_4501m7am82greh08e9t1ztdjfk37",
-  sharedConfigSha256: "bc2e1de7b133c0a91458c30a3b019aa8c53c9b8367c4e608a17cd4cb515b8fdb",
-  workflowSha256: "e41831433ac22e4c0fbcb4fb8d8cc03dd8723abb9f44526d3040f28bca8a74f3",
+  cohort: "maya_uniform_lead_conversion_20261116_r21",
+  startedAt: "2026-11-17T02:03:30.687Z",
+  controlVersionId: "agtvrsn_9701m7kkxce6ee3te35kr712cz05",
+  testVersionId: "agtvrsn_6901m7kkxe7mfmkbhybrfevv811s",
+  sharedConfigSha256: "eab65fcdab81eb4c43e9c03c092b0d4dbf4ab671955efc348883f506200cf29f",
+  workflowSha256: "f809401518b974f1c14c58eb620f3574d9e0cdf90e0a6a32f83faf7acef2c7b8",
   waitingAudio: { sound: "elevator1", availabilityToolId: "tool_4101m64g0xqteevsgfwtpgxv4he6",
     availabilityToolHash: "6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63" },
   minimumTrueLiveConversationsPerArm: 15,

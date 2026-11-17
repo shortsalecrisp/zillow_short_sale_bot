@@ -1,6 +1,41 @@
 # Uniform Conversion Comparison
 
-Current revision is r20, verified at 2026-11-13T14:16:09.687Z (November 13 at 9:16:09 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r20.
+Current revision is r21, verified at 2026-11-17T02:03:30.687Z (November 16 at 9:03:30.687 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r21.
+
+## Approved Revision 21: Matched Screening Recovery And Recording Safeguards
+
+Yoni approved the November 16 findings and separately approved the monitor pin update.
+The paired publisher changed exactly three reviewed prompt leaves: root business policy,
+embedded opening business policy plus its explicit screening-priority sentence, and short
+listing recovery policy. Fresh r20 readback showed its root at r20 while its embedded prefix
+still exactly matched r19; r21 repairs that exact pinned predecessor pair. A matching spoken
+target name with nonverbal cues gets only the listing question after screening; an unnamed or
+differently named new listener gets short identity plus listing. The full opener is not used
+after screening. Preserve confirmed listing state and pending questions. Recordings, silence
+commentary and unaddressed broadcasts do not establish human contact or contact consent.
+
+- Cohort: `maya_uniform_lead_conversion_20261116_r21`.
+- Boundary: `2026-11-17T02:03:30.687Z`.
+- Policy: `maya-uniform-lead-conversion-20261116-r21`.
+- Flash: `agtvrsn_9701m7kkxce6ee3te35kr712cz05`.
+- v4: `agtvrsn_6901m7kkxe7mfmkbhybrfevv811s`.
+- Root prompt (6,283 words, strictly below 6,300): `abe58dfc16e20b8d8a9405e676fce0d815e66b85f463af8957047121f9fb069b`.
+- Shared normalized body: `eab65fcdab81eb4c43e9c03c092b0d4dbf4ab671955efc348883f506200cf29f`.
+- Workflow: `f809401518b974f1c14c58eb620f3574d9e0cdf90e0a6a32f83faf7acef2c7b8`.
+
+Exact plan/readback: `voice-approved-repairs-20261116/paired-r21/` under the original
+voice task artifact root. Voices, models, tools, routing, edges, consent/ending gates,
+waiting audio, platform/phone/WhatsApp/procedures, 50/50 allocation, dispatch and local
+windows are unchanged. The shared backend also recognizes plural list-removal opt-outs,
+preserves explicit callback timing after hesitation, and does not promote recorded silence
+commentary or a sustained unaddressed financial broadcast to live contact. The original
+callback email template and durable no-resend claims are unchanged. No call or message was
+placed. Synthetic tests and exact readback are not organic adherence or acoustic proof.
+
+Preserve r20's fresh November 16 checkpoint of 56 genuine calls (Flash28/v4 28), with two
+unaccepted zero-duration failures excluded, separately. Caller-consented callback capture,
+Yoni's owner-confirmed completed callback and interest, and provider-completed transfers
+remain separate outcomes. No historical calls are admitted to r21.
 
 ## Approved Revision 20: Expected Target Pickup After Screening
 
