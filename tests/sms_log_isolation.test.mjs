@@ -95,3 +95,11 @@ test("busy incident lock sends no flood and performs no authorization or outboun
   assert.equal(h.mails.length, 0);
   assert.equal(h.logs[0].stage, "storage_incident_lock_busy");
 });
+
+test("a native-log outage does not suppress the deduplicated operational alert", () => {
+  const h = fixture(); h.failLog();
+  h.context.sendSystemAlertEmail_("SMS BOT ERROR", "Service Spreadsheets failed");
+  h.context.sendSystemAlertEmail_("SMS BOT ERROR", "Service Spreadsheets failed");
+  assert.equal(h.mails.length, 1);
+  assert.equal(JSON.parse(h.values.SMS_STORAGE_INCIDENT_V37).count, 2);
+});

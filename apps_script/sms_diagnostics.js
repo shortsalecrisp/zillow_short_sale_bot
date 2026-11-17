@@ -53,7 +53,7 @@ function isSmsStorageErrorV37_(subject, body) {
 function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(100)) {
-    writeSmsDiagnosticV37_("storage_incident_lock_busy", { reason: body });
+    try { writeSmsDiagnosticV37_("storage_incident_lock_busy", { reason: body }); } catch (_) {}
     return false;
   }
   var notice = null;
@@ -75,7 +75,7 @@ function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
         "Do not resend blindly. Reconcile the original request and safety checks.\n\n" + smsDiagnosticTextV37_(body, 4000);
     }
     props.setProperty("SMS_STORAGE_INCIDENT_V37", JSON.stringify(state));
-    writeSmsDiagnosticV37_("storage_incident", { count: state.count, reason: body });
+    try { writeSmsDiagnosticV37_("storage_incident", { count: state.count, reason: body }); } catch (_) {}
   } finally { lock.releaseLock(); }
   if (!notice) return false;
   MailApp.sendEmail({ to: toEmail, subject: "SMS BOT ERROR - storage outage", body: notice });
