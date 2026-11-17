@@ -24,6 +24,8 @@ AUTOMATIONS = {'lead-verifier-8-am', 'lead-verifier-11-am', 'lead-verifier-2-pm'
                'lead-verifier-5-pm', 'lead-verifier-8-pm'}
 LOCK = threading.RLock()
 VERSION = 'native_verifier_closeout_v1'
+RECOVERED_WORKBOOK = '1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE'
+FROZEN_WORKBOOK = '12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70'
 
 
 def native_get(token, path):
@@ -221,6 +223,10 @@ def journal_read(token, sid, run_id, phase):
     matches = [(number, r) for number, r in enumerate(rows[1:], 2)
                if len(r) >= 7 and r[0] == run_id and r[2] == phase]
     if not matches:
+        if sid == RECOVERED_WORKBOOK:
+            # Old run artifacts remain literal and immutable in the frozen
+            # source, with a complete private archive. Never invent a new run.
+            return journal_read(token, FROZEN_WORKBOOK, run_id, phase)
         return None
     digest = matches[-1][1][4]
     parts = [(number, r) for number, r in matches if r[4] == digest]
@@ -230,7 +236,14 @@ def journal_read(token, sid, run_id, phase):
     payloads = batch_read(token, sid, [f"'{TAB}'!H{number}:H{number}" for number, _ in parts])
     if any(not block or not block[0] or not isinstance(block[0][0], str) for block in payloads):
         raise ValueError('incomplete_immutable_gate_artifact')
-    data = gzip.decompress(base64.b64decode(''.join(block[0][0] for block in payloads)))
+    locator = ''.join(block[0][0] for block in payloads)
+    from verifier_proof_storage import MARKER, read
+    if locator.startswith(MARKER):
+        if len(parts) != 1:
+            raise ValueError('invalid_verifier_proof_locator')
+        data = read(locator, run_id, parts[0][1][1], phase, digest)
+    else:
+        data = gzip.decompress(base64.b64decode(locator))
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError('gate_artifact_digest_mismatch')
     return json.loads(data)
@@ -239,8 +252,12 @@ def journal_read(token, sid, run_id, phase):
 def journal_write(token, sid, run_id, automation, phase, artifact):
     encoded = json.dumps(artifact, separators=(',', ':')).encode()
     digest = hashlib.sha256(encoded).hexdigest()
-    compressed = base64.b64encode(gzip.compress(encoded)).decode()
-    parts = [compressed[n:n+30000] for n in range(0, len(compressed), 30000)]
+    if sid == RECOVERED_WORKBOOK:
+        from verifier_proof_storage import write
+        parts = [write(encoded, run_id, automation, phase)]
+    else:
+        compressed = base64.b64encode(gzip.compress(encoded)).decode()
+        parts = [compressed[n:n+30000] for n in range(0, len(compressed), 30000)]
     values = [[run_id, automation, phase, artifact['observed_at'], digest, str(i), str(len(parts)), part]
               for i, part in enumerate(parts)]
     sheets.append_values(token, sid, f"'{TAB}'!A:H", values)

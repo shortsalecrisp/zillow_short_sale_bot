@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List
 import requests
 
 
-WORKBOOK_ID = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
+WORKBOOK_ID = os.getenv("GSHEET_ID", "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE")
 PENDING_QUEUE_TAB = "PendingQueue"
 DETAIL_TASK_FALLBACK = "VI5izq8RGAL14zM75"
 ROOT = Path(__file__).resolve().parents[1]

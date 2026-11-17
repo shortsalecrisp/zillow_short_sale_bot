@@ -7831,9 +7831,10 @@ function extractOutputText_(parsed) {
 
 
 function getSmsSpreadsheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  // Keep the existing Tasker web app bound to the verified operational copy.
+  var ss = SpreadsheetApp.openById("1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE");
   if (!ss) {
-    throw new Error("Spreadsheet not available in bound Apps Script context");
+    throw new Error("Operational spreadsheet not available");
   }
   return ss;
 }
