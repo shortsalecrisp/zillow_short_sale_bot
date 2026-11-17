@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -21,7 +22,8 @@ from urllib.parse import urlencode, urlsplit
 import requests
 import video_followup_speech_guard as speech_guard
 
-from video_followup import Conflict, SCRIPT_VERSION, iso, normalize_name, utcnow, valid_name
+from video_followup import (Conflict, SCRIPT_VERSION, PROVIDER_RESULT_HANDLING_VERSION,
+                            iso, normalize_name, utcnow, valid_name)
 from video_followup_provider import (
     MAX_API_BYTES, REQUEST_TIMEOUT, SubmissionUncertain, VideoProviderError, _public_addresses, _ffmpeg_executable,
 )
@@ -41,6 +43,8 @@ from video_followup_speech_guard import (
     GENERAL_PRONUNCIATION_POLICY_VERSION, GENERAL_PRONUNCIATION_VERIFICATION_METHOD,
     REVIEWED_VARIANT_VERIFICATION_METHOD,
 )
+
+LOG = logging.getLogger(__name__)
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
 MODEL = "fal-ai/kling-video/lipsync/audio-to-video"
@@ -80,6 +84,52 @@ EVIDENCE_FIELDS = ("evidence_contract", "evidence_version", "evidence_sha256")
 _RUNTIME_CACHE = {}
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
+_TERMINAL_RESULT_ERRORS = frozenset({
+    "downstream_service_unavailable", "request_timeout", "startup_timeout",
+    "runner_scheduling_failure", "runner_connection_timeout", "runner_disconnected",
+    "runner_connection_refused", "runner_connection_error", "runner_incomplete_response",
+    "runner_server_error", "client_disconnected", "client_cancelled", "bad_request",
+    "internal_error", "content_policy_violation", "validation_error",
+})
+
+
+class _TerminalResultFailure(VideoProviderError):
+    def __init__(self, request_id, response, error_type):
+        super().__init__("fal_render_failed", "Completed provider request returned a terminal error.")
+        self.diagnostics = {
+            "provider_result_handling_version": PROVIDER_RESULT_HANDLING_VERSION,
+            "failure_stage": "provider_result", "underlying_code": error_type,
+            "exception_type": "VideoProviderError", "provider_http_status": response.status_code,
+            "provider_request_id": request_id, "provider_error_type": error_type,
+            "provider_response_sha256": hashlib.sha256(response.content).hexdigest(),
+        }
+
+
+def _terminal_result_error(value):
+    if not isinstance(value, dict):
+        return None
+    types = [value[field] for field in ("error_type", "type") if value.get(field)]
+    detail = value.get("detail")
+    if isinstance(detail, list) and 1 <= len(detail) <= 10:
+        types.extend(item.get("type") for item in detail if isinstance(item, dict))
+    if (not types or any(not isinstance(x, str) or x not in _TERMINAL_RESULT_ERRORS for x in types)
+            or len(set(types)) != 1):
+        return None
+    return types[0]
+
+
+def _terminal_failure_diagnostics(value):
+    if (value.get("provider_result_handling_version") != PROVIDER_RESULT_HANDLING_VERSION
+            or not isinstance(value.get("provider_error_type"), str)
+            or value.get("provider_error_type") not in _TERMINAL_RESULT_ERRORS
+            or type(value.get("provider_http_status")) is not int or not 400 <= value["provider_http_status"] < 600
+            or not _REQUEST_ID.fullmatch(str(value.get("provider_request_id", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("provider_response_sha256", "")))):
+        return {}
+    return {"failure_stage": "provider_result", "underlying_code": value["provider_error_type"],
+            "exception_type": "VideoProviderError", **{key: value[key] for key in (
+                "provider_result_handling_version", "provider_http_status", "provider_request_id",
+                "provider_error_type", "provider_response_sha256")}}
 _PREPARATION_FAILURE_CODES = frozenset({
     "master_mismatch", "reference_mismatch", "unapproved_voice_reference", "invalid_voice_reference_duration",
     "unsafe_fal_media", "fal_download_failed", "fal_download_empty", "invalid_narration_audio",
@@ -485,6 +535,8 @@ def _preparation_failure_diagnostics(exc, stage, audio_qa):
 def _failed_status(state):
     result = {"provider_id": state["id"], "status": "failed",
               "failure_code": state.get("failure_code", state["stage"])}
+    if result["failure_code"] == "fal_render_failed":
+        result.update(_terminal_failure_diagnostics(state))
     if result["failure_code"] == "greeting_preparation_failed":
         for field, allowed, fallback in (
                 ("failure_stage", _PREPARATION_FAILURE_STAGES, "unknown_preparation_stage"),
@@ -557,7 +609,7 @@ class SameTakeVideoProvider:
         if not isinstance(code, str) or code not in _PIPELINE_FAILURE_CODES:
             return {"failure_code": "unclassified_provider_failure"}
         if code != "greeting_preparation_failed":
-            return {"failure_code": code}
+            return {"failure_code": code, **(_terminal_failure_diagnostics(status) if code == "fal_render_failed" else {})}
         sanitized = _failed_status({**status, "id": "", "stage": "failed"})
         return {key: sanitized[key] for key in (
             "failure_code", "failure_stage", "underlying_code", "exception_type", "speech_diagnostics")
@@ -621,6 +673,11 @@ class SameTakeVideoProvider:
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity or budget changed.")
         _saved_generator_profile(state)
         _saved_verification_profile(state)
+        if "provider_result_handling_version" in state:
+            job, _ = self.store.read("jobs/" + state["job_key"])
+            if (state["provider_result_handling_version"] != PROVIDER_RESULT_HANDLING_VERSION
+                    or (job or {}).get("provider_result_handling_version") != PROVIDER_RESULT_HANDLING_VERSION):
+                raise VideoProviderError("pipeline_mismatch", "Stored result-handling identity changed.")
         if (state.get("generator_profile") == BOUNDED_PAD_GENERATOR_PROFILE
                 and state.get("verification_method") not in {
                     GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}):
@@ -653,7 +710,11 @@ class SameTakeVideoProvider:
                     and job.get("status") in {"submitting", "submitted", "processing"}
                     and normalize_name(job.get("first_name")) == state["first_name"])
 
-    def _json(self, method, url, *, headers, payload=None, paid=False):
+    def _json(self, method, url, *, headers, payload=None, paid=False, completed_request_id=None):
+        if completed_request_id is not None and (
+                method != "GET" or paid or not _REQUEST_ID.fullmatch(str(completed_request_id))
+                or url != REQUEST_BASE + completed_request_id):
+            raise VideoProviderError("request_mismatch", "Terminal-result request identity did not match.")
         try:
             response = self.session.request(method, url, headers=headers, json=payload,
                                             timeout=REQUEST_TIMEOUT, allow_redirects=False)
@@ -665,6 +726,16 @@ class SameTakeVideoProvider:
             if not 200 <= response.status_code < 300:
                 if paid:
                     raise SubmissionUncertain("same-take", "paid_stage_unconfirmed")
+                if (completed_request_id is not None and 400 <= response.status_code < 600
+                        and response.status_code not in {401, 403, 404, 408, 425, 429}
+                        and len(response.content) <= MAX_API_BYTES):
+                    try:
+                        value = response.json()
+                    except (ValueError, TypeError):
+                        value = None
+                    error_type = _terminal_result_error(value)
+                    if error_type and (not value.get("request_id") or value["request_id"] == completed_request_id):
+                        raise _TerminalResultFailure(completed_request_id, response, error_type)
                 transient = response.status_code in {408, 425, 429} or 500 <= response.status_code < 600
                 raise VideoProviderError("status_unavailable" if transient else "status_rejected",
                                          "Provider status request was not accepted.")
@@ -770,6 +841,9 @@ class SameTakeVideoProvider:
                  "generator_profile": profile["name"], "generator_config": profile["config"],
                  "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"],
                  "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!", **verification}
+        job, _ = self.store.read("jobs/" + job_id)
+        if (job or {}).get("provider_result_handling_version") == PROVIDER_RESULT_HANDLING_VERSION:
+            state["provider_result_handling_version"] = PROVIDER_RESULT_HANDLING_VERSION
         if self.verification_method in PLANNED_VERIFICATION_PROFILES:
             descriptor = _capture_evidence_descriptor(state, speech_paths)
             content = json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode()
@@ -1150,7 +1224,20 @@ class SameTakeVideoProvider:
                 return {"provider_id": pipeline_id, "status": "processing"}
             if result.get("status") != "COMPLETED":
                 raise VideoProviderError("fal_status_unknown", "Fal returned an unknown state.")
-            result = self._json("GET", REQUEST_BASE + request_id, headers=headers)
+            if state.get("provider_result_handling_version") == PROVIDER_RESULT_HANDLING_VERSION:
+                if result.get("request_id") != request_id:
+                    raise VideoProviderError("request_mismatch", "Completed status did not bind the stored request.")
+                try:
+                    result = self._json("GET", REQUEST_BASE + request_id, headers=headers, completed_request_id=request_id)
+                except _TerminalResultFailure as error:
+                    latest = self._update(pipeline_id, {"stage": "failed", "failure_code": "fal_render_failed",
+                        "failure_at": iso(utcnow()), **error.diagnostics}, "fal_pending")
+                    LOG.warning("VIDEO_PROVIDER_TERMINAL_FAILURE job=%s request=%s http_status=%s error_type=%s",
+                                state["job_key"][:12], request_id, error.diagnostics["provider_http_status"],
+                                error.diagnostics["provider_error_type"])
+                    return _failed_status(latest) if latest["stage"] == "failed" else {"provider_id": pipeline_id, "status": "processing"}
+            else:
+                result = self._json("GET", REQUEST_BASE + request_id, headers=headers)
             if result.get("error") or not isinstance(result.get("video"), dict):
                 latest = self._update(pipeline_id, {"stage": "failed", "failure_code": "fal_render_failed"}, "fal_pending")
                 return {"provider_id": pipeline_id, "status": "failed" if latest["stage"] == "failed" else "processing"}

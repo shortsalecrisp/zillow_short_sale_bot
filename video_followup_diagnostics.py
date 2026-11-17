@@ -11,9 +11,14 @@ PIPELINE = re.compile(r"same-take-[a-f0-9]{32}")
 JOB_FIELDS = ("id", "followup_key", "status", "variant", "created_at", "initial_sent_at",
               "first_name", "stable_id", "phone", "provider_id", "reserved_at", "budget_settled",
               "failure_stage", "underlying_code", "exception_type", "failure_at", "reason",
-              "preflight_confirmed_unpaid", "verification_retry_pending", "verification_retry_exhausted")
+              "preflight_confirmed_unpaid", "verification_retry_pending", "verification_retry_exhausted",
+              "provider_result_handling_version", "provider_http_status", "provider_request_id",
+              "provider_error_type", "provider_response_sha256", "budget_hold_reason", "budget_blocked_at",
+              "budget_hold_inflight", "budget_hold_today_cents", "budget_hold_month_cents")
 PIPELINE_FIELDS = ("id", "stage", "created_at", "updated_at", "job_key", "failure_code",
-                   "failure_stage", "underlying_code", "exception_type", "reserved_cents")
+                   "failure_stage", "underlying_code", "exception_type", "reserved_cents",
+                   "provider_result_handling_version", "provider_http_status", "provider_request_id",
+                   "provider_error_type", "provider_response_sha256")
 
 
 def validate_keys(raw):

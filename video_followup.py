@@ -34,9 +34,10 @@ _RECEIPT_IDENTITY_FIELDS = ("initial_receipt", "initial_receipt_key")
 INITIAL_RECEIPT_SCHEMA = "initial-sms-receipt-v1"
 GENERATION_OWNER_SCHEMA = "initial-sms-generation-owner-v1"
 RECEIPT_SELECTION_VERSION = "receipt-owned-selection-v1"
+PROVIDER_RESULT_HANDLING_VERSION = "terminal-result-v1"
 MAX_RECEIPT_OWNERSHIP_JOBS = 10000
 _JOB_IDENTITY_FIELDS = ("id", "followup_key", "provider_id", "first_name", "phone",
-                        "stable_id", "initial_sent_at", "script_version") + _VERIFICATION_IDENTITY_FIELDS + _RECEIPT_IDENTITY_FIELDS
+                        "stable_id", "initial_sent_at", "script_version", "provider_result_handling_version") + _VERIFICATION_IDENTITY_FIELDS + _RECEIPT_IDENTITY_FIELDS
 _ACTIVE_VERIFICATION_FAILURE_FIELDS = (
     "failure_stage", "underlying_code", "exception_type", "failure_at", "reason", "speech_diagnostics",
     "finalization_retry_at", "ready_audit_retry_at", "preflight_retry_at", "verification_retry_exhausted",
@@ -478,6 +479,7 @@ class Store:
             job = self.mutate("jobs/" + key, lambda old: None if old else {
                 **context, "id": secrets.token_hex(16), "status": "prepared",
                 "receipt_selection_version": RECEIPT_SELECTION_VERSION,
+                "provider_result_handling_version": PROVIDER_RESULT_HANDLING_VERSION,
                 "script_version": SCRIPT_VERSION, "created_at": iso(utcnow())})
         if (job["status"] in {"prepared", "submitted", "submitting", "processing"}
                 or (job["status"] == "ready" and not job.get("variant") and not self.has_speech_proof(job))):
@@ -485,7 +487,7 @@ class Store:
             self.mutate("active/" + key, lambda old: None if old else {"key": key})
         return job
 
-    def reserve(self, key, config, now):
+    def reserve(self, key, config, now, *, decision=None):
         # One global CAS ledger means concurrent workers cannot each spend the
         # last budget slot. Crashed/failed requests keep their reservation.
         local_day = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
@@ -501,11 +503,19 @@ class Store:
             # A prepared job may have crashed between reservation and its
             # submission lease. Re-budget it for the actual submission day.
             others = {k: v for k, v in entries.items() if k != key}
-            if sum(bool(item.get("inflight")) for item in others.values()) >= 2:
-                return None
+            inflight = sum(bool(item.get("inflight")) for item in others.values())
             total = sum(item["cents"] for item in others.values() if item["day"][:7] == month)
             today = sum(item["cents"] for item in others.values() if item["day"] == day)
+            if decision is not None:
+                decision.clear()
+                decision.update(inflight=inflight, today_cents=today, month_cents=total, reason="")
+            if inflight >= 2:
+                if decision is not None:
+                    decision["reason"] = "inflight_limit"
+                return None
             if today + config.reserve_cents > config.daily_cents or total + config.reserve_cents > config.monthly_cents:
+                if decision is not None:
+                    decision["reason"] = "daily_limit" if today + config.reserve_cents > config.daily_cents else "monthly_limit"
                 return None
             accepted[0] = True
             entry = {"day": day, "cents": config.reserve_cents, "inflight": True}
@@ -923,9 +933,26 @@ class Worker:
             if eligible is not True:
                 return
             now = self.now()
-            if not self.store.reserve(key, self.config, now):
+            decision = {} if job.get("provider_result_handling_version") == PROVIDER_RESULT_HANDLING_VERSION else None
+            reserved = (self.store.reserve(key, self.config, now, decision=decision) if decision is not None
+                        else self.store.reserve(key, self.config, now))
+            if not reserved:
                 # Budget/capacity can recover; the due-time text freeze wins if
                 # it has not recovered before the unchanged scheduled follow-up.
+                if decision and decision.get("reason"):
+                    details = {"budget_hold_reason": decision["reason"],
+                               "budget_hold_inflight": decision["inflight"],
+                               "budget_hold_today_cents": decision["today_cents"],
+                               "budget_hold_month_cents": decision["month_cents"]}
+                    def hold(old):
+                        if (not _same_job_attempt(old, job, "preflight_attempts")
+                                or all(old.get(k) == v for k, v in details.items())):
+                            return None
+                        return {**old, **details, "budget_blocked_at": iso(now)}
+                    self.store.mutate("jobs/" + key, hold)
+                    if any(job.get(k) != v for k, v in details.items()):
+                        LOG.warning("VIDEO_CAPACITY_HOLD job=%s reason=%s inflight=%s", key[:12],
+                                    decision["reason"], decision["inflight"])
                 return
             job.update(status="submitting", lease_at=iso(now), reserved_at=iso(now),
                        preflight_attempts=preflight_attempts + 1)
@@ -1173,6 +1200,8 @@ class Service:
                 # whether this same-key fallback can create a new text entry.
                 return fallback, metadata
             metadata.update(video_variant=job["variant"], video_job_id=job["id"])
+            if job["variant"] == "text" and job.get("budget_hold_reason") in {"inflight_limit", "daily_limit", "monthly_limit"}:
+                metadata["selection_reason"] = "video_budget_" + job["budget_hold_reason"]
             if job.get("receipt_selection_version") == RECEIPT_SELECTION_VERSION:
                 metadata["receipt_selection_version"] = RECEIPT_SELECTION_VERSION
             if job["variant"] == "video":
