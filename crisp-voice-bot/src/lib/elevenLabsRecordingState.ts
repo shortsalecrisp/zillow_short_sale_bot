@@ -34,6 +34,19 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
+export function isRecordingSilenceCommentary(message: string): boolean {
+  const text = normalizeText(message).replace(/[()]/g, "");
+  return /^no action needed[.!,:; -]+waiting silently[.!,:; -]+as this is a recording and not a live person[.! ]*$/.test(text) ||
+    /^understood[.!,:; -]+i(?:'ll| will) remain silent and wait for a live person or further instructions[.! ]*$/.test(text);
+}
+
+export function isUnaddressedFinancialBroadcast(message: string): boolean {
+  const text = normalizeText(message);
+  const topics = ["basis points", "crude", "brent", "nvidia", "nasdaq", "dow jones", "s&p"];
+  return text.split(/\s+/).length >= 45 && topics.filter(topic => text.includes(topic)).length >= 3 &&
+    !text.includes("?") && !/\b(?:your call|you(?:'re| are) calling|can you|could you|call (?:me|us)|do not call|take (?:me|us) off|i(?:'m| am) (?:here|the listing agent))\b/.test(text);
+}
+
 export function hasTerminalVoicemailManagementMenu(transcript: RecordingStateTranscriptItem[]): boolean {
   const messages = transcript.filter(item => item.role === "user" && typeof item.message === "string")
     .map(item => normalizeText(item.message!));
@@ -130,7 +143,7 @@ export function isRecordingOrScreeningArtifact(
   const combined = normalizeText(`${summary} ${messages.join(" ")}`);
   const hasGoogleCallAssist = /\bcall assist by google\b/.test(combined);
   const hasAutomationSignal =
-    messages.some(isAutomatedMessage) ||
+    messages.some(message => isAutomatedMessage(message) || isUnaddressedFinancialBroadcast(message)) ||
     /\b(?:automated (?:system|attendant)|recording|pre-?recorded|call screening|screening service|phone tree|ivr|virtual assistant)\b/.test(
       combined,
     );
@@ -141,7 +154,8 @@ export function isRecordingOrScreeningArtifact(
 
   let lastAutomationIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isAutomatedMessage(messages[index])) {
+    if (isAutomatedMessage(messages[index]) || isUnaddressedFinancialBroadcast(messages[index]) ||
+        isRecordingSilenceCommentary(messages[index])) {
       lastAutomationIndex = index;
       break;
     }

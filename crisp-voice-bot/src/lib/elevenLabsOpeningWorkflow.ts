@@ -15,8 +15,8 @@ export const VOICE_STATE_TRANSITION_NODES = Object.freeze({
 
 export const SHORT_LISTING_RECOVERY_PROMPT = `# Short listing-check recovery state
 
-On first entry, select exactly one entire turn from the actual listener context.
-Only when a genuinely NEW live person has just joined after automated screening or hold and has not heard your identity, say exactly:
+On first entry, select exactly one entire turn from the actual listener context. After screening/hold, a live listener who explicitly supplies the expected {{firstName}}, including nonverbal throat-clearing, gets only "${VOICE_SHORT_LISTING_RECOVERY}". Never infer identity from the number, screener or placeholder.
+Only when an unnamed or differently named genuinely NEW live person has just joined after automated screening or hold and has not heard your identity, say exactly:
 "${VOICE_NEW_LISTENER_RECOVERY}"
 If this is the same listener who already heard your identity and is only repeating hello or checking your presence, say exactly:
 "${VOICE_SHORT_LISTING_RECOVERY}"
@@ -40,7 +40,7 @@ Start with the pickup and introduction rules. This node shares the complete busi
 
 Listen first. Do not speak before the recipient finishes their pickup. Do not treat noise, side conversations, ringing or placeholder ... as a live answer; use skip_turn and wait. During the initial greeting, before a NEW live caller reply after the introduction, do not qualify the listing, add to the exact listing-agent check below, or offer a transfer. Once that new reply arrives, the shared business policy and opening handoff contract govern the next response even if this node remains active.
 
-For a new live listener who only says hello, identifies themselves as the agent, says they are here, or gives a readiness cue such as "Go ahead" or "I'm listening", say exactly this entire turn:
+Only on an initial unscreened pickup, for a new live listener who only says hello, identifies themselves as the agent, says they are here, or gives a readiness cue such as "Go ahead" or "I'm listening", say exactly this entire turn:
 "${VOICE_OPENING_SCRIPT}"
 Stop after the question. Do not add anything. Wait for a NEW live caller turn. Their pickup before the introduction is not a response to it. Do not repeat the introduction to the same listener because of silence. If the only new transcript is "...", noise or silence, call skip_turn and wait; never say "Are you there?" or restart the introduction.
 

@@ -8,6 +8,30 @@ import { sha256 } from '../src/scripts/syncElevenLabsPromptOnly.mjs';
 import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE } from '../src/scripts/verifyElevenLabsComparison.mjs';
 import { applySharedBusinessPrompt, sharedBusinessPromptProtectedHashes } from '../src/scripts/elevenLabsSharedBusinessPrompt.mjs';
 import {applyConversationRecovery,recoveryProtectedHashes} from '../src/scripts/elevenLabsConversationRecovery.mjs';
+import {applyScreeningRecovery,screeningRecoveryProtectedHashes,SCREENING_RECOVERY_POLICY} from '../src/scripts/elevenLabsScreeningRecovery.mjs';
+
+test('screening repair changes only three reviewed prompt leaves with guarded paired readback',async t=>{
+  const s=await setup(t,true),old='# Role and style\n'+s.agents[0].conversation_config.agent.prompt.prompt,next='# Role and style\n'+s.prompt;
+  for(const a of s.agents){a.conversation_config.agent.prompt.prompt=old;a.workflow={version:1,nodes:{
+    opening_listener:{conversation_config:{agent:{prompt:{prompt:old+'\n\n[CRISP_OPENING_HANDOFF_POLICY]\nProtected consent and ending suffix.'}}}},
+    short_listing_recovery:{conversation_config:{agent:{prompt:{prompt:'# Short listing-check recovery state\nProtected confirmed-state and ending guards.'}}}},
+  },edges:{keep:{order:1,reroutes:[]}}};}
+  await writeFile(s.options.promptPath,'## Prompt\n'+next);
+  s.options.branches=s.agents.map(a=>({id:a.branch_id,version:a.version_id,promptHash:sha256(old)}));
+  const before=structuredClone(s.agents[0]),after=applyScreeningRecovery(before,next);
+  assert.deepEqual(screeningRecoveryProtectedHashes(after),screeningRecoveryProtectedHashes(before));
+  assert.equal(after.workflow.version,1);assert.deepEqual(after.workflow.edges,before.workflow.edges);
+  assert.ok(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt.includes(SCREENING_RECOVERY_POLICY));
+  assert.ok(after.workflow.nodes.short_listing_recovery.conversation_config.agent.prompt.prompt.includes(SCREENING_RECOVERY_POLICY));
+  assert.throws(()=>applyScreeningRecovery(before,'# Role and style\n'+'word '.repeat(6300)),/6300/);
+  const bad=structuredClone(before);bad.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt='unexpected';
+  assert.throws(()=>applyScreeningRecovery(bad,next),/boundary/);
+  const options={...s.options,repairScreeningRecovery:true};
+  const plan=await syncComparisonPrompts(options,s.fetcher);assert.equal(s.writes.length,0);
+  const receipt=await syncComparisonPrompts({...options,apply:true},s.fetcher);
+  assert.equal(receipt.release,'screening-listener-and-recording-r21');assert.deepEqual(s.writes,['branch_0','branch_1']);
+  assert.equal(receipt.sharedHash,plan.sharedHash);assert.equal(receipt.realCallsPlaced,false);
+});
 
 test('confirmed-state release changes only five reviewed leaves in both arms and keeps the strict prompt limit',async t=>{
   const s=await setup(t,true);

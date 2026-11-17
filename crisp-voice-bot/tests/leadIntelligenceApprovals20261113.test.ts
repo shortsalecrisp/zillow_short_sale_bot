@@ -30,8 +30,10 @@ test("self-identified target after screening gets only the short listing questio
   const prompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
   assert.match(OPENING_HANDOFF_POLICY, /explicitly identifies themself as the expected target/);
   assert.ok(OPENING_HANDOFF_POLICY.includes(VOICE_SHORT_LISTING_RECOVERY));
-  assert.match(prompt, /explicitly identifies themself as the expected \{\{firstName\}\}/);
-  assert.match(prompt, /Never repeat the screener response, Maya\/Crisp identity/);
+  assert.match(prompt, /matching spoken \{\{firstName\}\}/);
+  assert.match(prompt, /throat-clearing or nonverbal cues/);
+  assert.match(prompt, /Never use the full opener after screening/);
+  assert.match(prompt, /An unnamed hello or differently named listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
 });
 
 test("named target after screening outranks gatekeeper persistence", async () => {

@@ -4,6 +4,8 @@ function normalizeText(value: string): string {
 
 export function looksLikeDoNotCall(value: string): boolean {
   const text = normalizeText(value);
+  const listRemoval = [...text.matchAll(/\b(?:take|remove)\s+(?:me|us)\s+(?:off|from)\s+(?:your\s+|the\s+)?(?:(?:call|caller|calling)\s+)?list\b/g)]
+    .some(match => !/\b(?:do not|don't|dont|never|not)\s*$/.test(text.slice(0, match.index)));
   const hasCallerOptOut = [...text.matchAll(/\b(?:do not|don't|dont)\s+call\b/g)].some((match) => {
     const target = text.slice(match.index! + match[0].length);
     // A named specialist refusal and "call that a commitment" do not opt the
@@ -28,7 +30,7 @@ export function looksLikeDoNotCall(value: string): boolean {
     /\bstop\s+(?:contacting|reaching out to)\s+(?:me|us)\b/.test(text) ||
     /\bnever\s+call(?:\s+me)?\s+again\b/.test(text) ||
     /\bno\s+more\s+calls?\b/.test(text) ||
-    /\b(?:take|remove)\s+me\s+(?:off|from)\s+(?:your\s+|the\s+)?(?:(?:call|caller|calling)\s+)?list\b/.test(text)
+    listRemoval
   );
 }
 

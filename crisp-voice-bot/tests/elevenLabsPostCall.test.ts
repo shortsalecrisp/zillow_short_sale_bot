@@ -22,6 +22,32 @@ process.env.ALERT_EMAIL_TO = "";
 
 const originalAdapter = axios.defaults.adapter;
 
+test("approved plural opt-out wins and filler timing never invents or overrides consent", async () => {
+  const api = await import('../src/lib/elevenLabsPostCall');
+  const optout={status:'done',transcript:[{role:'agent',message:'Would help with lender paperwork or calls be useful for this listing?'},{role:'user',message:'No, we already got it. Take us off your list.'}]};
+  assert.equal(api.shouldTreatAsDoNotCall(optout),true);
+  assert.equal(api.getVoiceContactRequestResult(optout),'do_not_call');
+  const timing=[{role:'agent',message:'Would you like me to request a callback?'},{role:'user',message:'Yes.'},{role:'agent',message:'What time would you like to request?'},{role:'user',message:'Mm. Today at 4:00 p.m.'}];
+  assert.equal(api.getExplicitCallbackConsent({transcript:timing})?.callbackTime,'Today at 4:00 p.m');
+  assert.equal(api.getExplicitCallbackConsent({transcript:timing.slice(2)}),undefined);
+  assert.equal(api.getExplicitCallbackConsent({transcript:[...timing,{role:'user',message:'Cancel the callback.'}]}),undefined);
+  assert.equal(api.getExplicitCallbackConsent({transcript:[...timing,{role:'user',message:'Take us off your list.'}]}),undefined);
+});
+
+test("terminal IVR meta-commentary remains unavailable, not a live contact request", async () => {
+  const api = await import('../src/lib/elevenLabsPostCall');
+  const c={status:'done',transcript:[
+    {role:'user',message:"Thank you for calling our mortgage office. If you know your party's extension, dial it now. For assistance dial zero."},
+    {role:'agent',message:"Understood. I'll remain silent and wait for a live person or further instructions."},
+    {role:'user',message:"Understood. I'll remain silent and wait for a live person or further instructions."},
+  ]};
+  assert.equal(api.getAuthoritativeTerminalCallResult(c,1),'agent_not_available');
+  assert.equal(api.getExplicitCallbackConsent(c),undefined);
+  assert.equal(api.getVoiceContactRequestResult(c),undefined);
+  assert.equal(api.getVoiceContactRequestResult({...c,transcript:[...c.transcript,{role:'user',message:'Please call me back tomorrow at ten.'}]}),undefined);
+  assert.equal(api.getExplicitCallbackConsent({...c,transcript:[...c.transcript,{role:'user',message:'Please call me back tomorrow at ten.'}]})?.callbackTime,'tomorrow at ten');
+});
+
 test('Compass first live office pickup after IVR outranks identity-mismatch voicemail', async () => {
   const api = await import('../src/lib/elevenLabsPostCall');
   const c = {status:'done', has_user_audio:true, transcript:[

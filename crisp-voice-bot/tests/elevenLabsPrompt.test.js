@@ -78,13 +78,13 @@ test("a question keeps the entire response answer-only even after it is answered
 test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
   const s = section("Intro only");
-  assert.match(s, /For a first-turn question, answer only those points from the answer library, not the introduction/);
-  assert.match(s, /Never repeat answered identity or purpose/);
-  assert.match(s, /After screening or hold, a genuinely new listener gets/);
+  assert.match(s, /Answer first-turn questions from the answer library without an introduction or repeated identity\/purpose/);
+  assert.match(s, /After screening\/hold, select BEFORE speech/);
+  assert.match(s, /matching spoken \{\{firstName\}\}/);
   assert.match(s, /Hi, \{\{assistantName\}\} with Crisp Short Sales\. Is \{\{streetAddress\}\} your listing\?/);
-  assert.match(s, /same listener's repeated hello gets only/);
-  assert.match(s, /ONLY while unconfirmed; after confirmation use the pending-question repair above/);
-  assert.match(s, /Never repeat the screener response or full sales introduction/);
+  assert.match(s, /same-listener repeated hello gets only the listing question while unconfirmed/);
+  assert.match(s, /otherwise repair only the pending question/);
+  assert.match(s, /Never use the full opener after screening/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -315,9 +315,10 @@ test("recordings and hold never create human contact outcomes", () => {
   assert.match(s, /including first-person email\/callback instructions/);
   assert.match(s, /never authorize callback_requested, information_requested, not_interested or live_transfer_requested/);
   assert.match(s, /give this spoken response once/);
-  assert.match(s, /Do not use skip_turn instead of answering that request/);
-  assert.match(s, /For automated[^\n]+use skip_turn; do not pitch, qualify or end/);
-  assert.match(s, /Never treat canned hold text as a new live greeting/);
+  assert.match(s, /Answer that request, then keep the call open/);
+  assert.match(s, /For automated[^\n]+use skip_turn without pitching, qualifying or ending/);
+  assert.match(s, /Canned hold text is not a live greeting/);
+  assert.match(s, /Never speak silence notes or answer unaddressed background broadcasts/);
 });
 test("voicemail keeps attempt limits, live-admin distinction and safe mismatch handling", () => {
   const s = section("Voicemail and recorded exits");

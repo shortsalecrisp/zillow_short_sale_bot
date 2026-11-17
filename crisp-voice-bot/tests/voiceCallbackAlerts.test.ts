@@ -31,6 +31,20 @@ function fixture(){
   Object.assign(deps,{policy:async()=>({activatedAt:'2026-11-11T14:00:00Z'})});
   return {row,receipt,states,sent,deps,block:()=>{blocked=true;}};
 }
+test("Darcy-style filler preserves the requested time in the original template and remains duplicate-safe",async()=>{
+  const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');
+  const f=fixture();f.receipt.transcript=[
+    {role:'agent',message:'Would you like me to request a callback?'},{role:'user',message:'Yes.'},
+    {role:'agent',message:'What time would you like to request?'},{role:'user',message:'Mm. Today at 4:00 p.m.'},
+    {role:'agent',message:"Thanks. I've received your callback request."},
+  ];
+  const service=createVoiceCallbackAlertService(f.deps);await service.enqueue(identity);
+  assert.equal(await service.settle(identity.conversationId),'accepted');
+  await createVoiceCallbackAlertService(f.deps).recover();await service.settle(identity.conversationId);
+  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/Scheduled Time: Today at 4:00 p\.m/);
+  const {buildCallbackEmailMessage}=await import('../src/lib/sendCallbackEmail');
+  assert.equal(f.sent[0].subject,buildCallbackEmailMessage({agentName:identity.agentName,phone:identity.phone,listingAddress:identity.listingAddress,callbackTime:'Today at 4:00 p.m'}).subject);
+});
 test("verified callback sends one complete hot-lead email, independent of transcript toggle; restart and replay cannot duplicate",async()=>{
   const {createVoiceCallbackAlertService,getVoiceCallbackAlertStatus}=await import('../src/lib/voiceCallbackAlerts');
   const f=fixture(),before=[...f.row],service=createVoiceCallbackAlertService(f.deps);

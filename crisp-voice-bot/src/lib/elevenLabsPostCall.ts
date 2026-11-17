@@ -714,6 +714,7 @@ function retainPreviouslySuppliedCallbackDay(previous: string, correction: strin
 
 function isCallbackTimingClarification(value: string): boolean {
   const words = normalizeText(value)
+    .replace(/^(?:(?:mm+|hmm+|um+|uh+)[.!?,;: ]+)*/, "")
     .replace(/^(?:(?:actually|sorry|no|yes|ok|okay|i mean|i meant|make that|correction)[,;: ]+)*/, "")
     .replace(/(?:[.! ]+)(?:thanks|thank you|goodbye|bye)[.! ]*$/, "")
     .replace(/[,;.! ]*(?:and )?use (?:this|the same) number[.! ]*$/, "")
