@@ -116,6 +116,39 @@ def test_successful_future_result_keeps_video_verification_path(world):
     assert fixtures.state(world, identifier)["stage"] == "completed"
 
 
+def test_terminal_result_option_cannot_authorize_paid_or_off_origin_request(world):
+    service, _, session, *_ = world
+    before = session.request.call_count
+    for method, url in (("POST", provider.QUEUE + provider.MODEL),
+                        ("GET", "https://private.invalid/" + fixtures.FAL_ID)):
+        with pytest.raises(provider.VideoProviderError, match="identity"):
+            service._json(method, url, headers={}, completed_request_id=fixtures.FAL_ID)
+    assert session.request.call_count == before
+
+
+@pytest.mark.parametrize("damage", ["oversized", "invalid_json"])
+def test_bad_terminal_result_body_cannot_release_capacity(world, damage):
+    identifier = at_fal_pending(world)
+    session = world[2]
+    original = session.request.side_effect
+    def request(method, url, **kwargs):
+        if url == provider.REQUEST_BASE + fixtures.FAL_ID + "/status":
+            return fixtures.Response({"status": "COMPLETED", "request_id": fixtures.FAL_ID})
+        if url == provider.REQUEST_BASE + fixtures.FAL_ID:
+            response = fixtures.Response({"error_type": "request_timeout"}, 504)
+            if damage == "oversized":
+                response.content = b"x" * (provider.MAX_API_BYTES + 1)
+            else:
+                response.json = Mock(side_effect=ValueError("private"))
+            return response
+        return original(method, url, **kwargs)
+    session.request.side_effect = request
+    before = world[1].read("same-take/" + identifier)
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert world[1].read("same-take/" + identifier) == before
+
+
 class CapacityLoggingTests(core_fixtures.unittest.TestCase):
     setUp = core_fixtures.VideoFollowupTests.setUp
     make_config = core_fixtures.VideoFollowupTests.make_config
