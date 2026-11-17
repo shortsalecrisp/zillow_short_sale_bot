@@ -13,7 +13,7 @@ Job):
   GOOGLE_SVC_JSON      – (optional) entire JSON for service‑account
 
 Google Sheet:
-https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70
+https://docs.google.com/spreadsheets/d/1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE
 """
 
 import os, json, html, textwrap, datetime, sqlite3, requests, re, time
@@ -133,7 +133,7 @@ def _retry_gspread_call(label: str, func):
 
 SHEET = _retry_gspread_call(
     "open sheet",
-    lambda: client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1,
+    lambda: client.open_by_key(os.getenv("GSHEET_ID", "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE")).sheet1,
 )
 
 # ------------------  local dedupe DB ------------------
