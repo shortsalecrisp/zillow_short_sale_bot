@@ -39,7 +39,7 @@ from sheet_safety import (  # noqa: E402
 )
 
 
-SPREADSHEET_ID = os.getenv("GSHEET_ID", "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE")
+SPREADSHEET_ID = os.getenv("GSHEET_ID", "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70")
 MAIN_TAB = "Sheet1"
 PILOT_TAB = "Lead Source Pilot"
 RUN_RECEIPT_TAB = os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_TAB", "Pilot Run Receipts")
