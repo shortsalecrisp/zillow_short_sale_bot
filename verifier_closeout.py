@@ -252,7 +252,8 @@ def journal_read(token, sid, run_id, phase):
 def journal_write(token, sid, run_id, automation, phase, artifact):
     encoded = json.dumps(artifact, separators=(',', ':')).encode()
     digest = hashlib.sha256(encoded).hexdigest()
-    if sid == RECOVERED_WORKBOOK:
+    # A restored original must retain compact proof storage too.
+    if sid in {RECOVERED_WORKBOOK, FROZEN_WORKBOOK}:
         from verifier_proof_storage import write
         parts = [write(encoded, run_id, automation, phase)]
     else:

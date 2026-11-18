@@ -82,24 +82,26 @@ def fake_journal(rows):
     return read
 
 
-def test_recovered_sheet_keeps_one_small_native_receipt_with_exact_full_artifact_readback():
+@pytest.mark.parametrize('workbook', [gate.RECOVERED_WORKBOOK, gate.FROZEN_WORKBOOK])
+def test_operational_workbook_keeps_one_small_native_receipt_with_exact_full_artifact_readback(workbook):
     store, rows = Store(), [gate.HEADERS]
     artifact = {'observed_at': '2026-11-17T23:00:00Z', 'complete': False,
                 'literal_receipts': ['uncertain', 'held', 'sent'] * 10000}
     with mock.patch.object(proof, 'objects', return_value=store), \
          mock.patch.object(gate, 'batch_read', side_effect=fake_journal(rows)), \
          mock.patch.object(gate.sheets, 'append_values', side_effect=lambda *args: rows.extend(args[3])):
-        digest = gate.journal_write('token', gate.RECOVERED_WORKBOOK, RUN, AUTO, PHASE, artifact)
+        digest = gate.journal_write('token', workbook, RUN, AUTO, PHASE, artifact)
         assert len(rows) == 2 and rows[1][4] == digest
         assert rows[1][7].startswith(proof.MARKER)
-        assert gate.journal_read('token', gate.RECOVERED_WORKBOOK, RUN, PHASE) == artifact
+        assert gate.journal_read('token', workbook, RUN, PHASE) == artifact
 
 
-def test_storage_failure_cannot_append_a_native_positive_proof_reference():
+@pytest.mark.parametrize('workbook', [gate.RECOVERED_WORKBOOK, gate.FROZEN_WORKBOOK])
+def test_storage_failure_cannot_append_a_native_positive_proof_reference(workbook):
     with mock.patch.object(proof, 'objects', side_effect=RuntimeError('storage unavailable')), \
          mock.patch.object(gate.sheets, 'append_values') as append:
         with pytest.raises(RuntimeError, match='storage unavailable'):
-            gate.journal_write('token', gate.RECOVERED_WORKBOOK, RUN, AUTO, PHASE,
+            gate.journal_write('token', workbook, RUN, AUTO, PHASE,
                                {'observed_at': '2026-11-17T23:00:00Z'})
         append.assert_not_called()
 
