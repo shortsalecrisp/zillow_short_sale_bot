@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -29,6 +30,33 @@ class Store:
 
 
 RUN, AUTO, PHASE = 'a-real-run-identifier', 'lead-verifier-5-pm', 'initial'
+
+
+@pytest.mark.parametrize('damage', [None, 'manifest', 'generation', 'hash', 'row', 'key', 'mixed'])
+def test_existing_history_is_read_only_hash_and_identity_bound(damage):
+    store = Store()
+    artifact = {'observed_at': '2026-11-16T23:00:00Z', 'complete': False, 'literal': 'held'}
+    raw = json.dumps(artifact, separators=(',', ':')).encode()
+    index = [RUN, AUTO, PHASE, artifact['observed_at'], proof.sha(raw), '0', '1']
+    values = [gate.HEADERS, index + [__import__('base64').b64encode(gzip.compress(raw)).decode()]]
+    payload = json.dumps(values).encode()
+    key = proof.HISTORY_KEY.rsplit('/', 1)[0] + '/rows-00001.json.gz'
+    item = {'row': 1, 'count': 2, 'key': key, 'generation': 17, 'sha256': proof.sha(payload)}
+    manifest = {'complete': True, 'tab': gate.TAB, 'rows': 4554, 'columns': 8, 'chunks': [item]}
+    if damage == 'key': item['key'] = 'other/key'
+    body = json.dumps(manifest).encode()
+    store.data[proof.HISTORY_KEY] = (body + (b' ' if damage == 'manifest' else b''), proof.HISTORY_GENERATION)
+    store.data[key] = (gzip.compress(payload + (b' ' if damage == 'hash' else b'')), 18 if damage == 'generation' else 17)
+    native = [gate.HEADERS, index + [proof.HISTORY_MARKER + ('3' if damage == 'row' else '2')]]
+    if damage == 'mixed': native[1][7] += 'invalid'
+    with mock.patch.object(proof, 'objects', return_value=store), \
+         mock.patch.object(proof, 'HISTORY_SHA256', proof.sha(body)), \
+         mock.patch.object(gate, 'batch_read', side_effect=fake_journal(native)):
+        if damage:
+            with pytest.raises(ValueError): gate.journal_read('token', gate.FROZEN_WORKBOOK, RUN, PHASE)
+        else:
+            assert gate.journal_read('token', gate.FROZEN_WORKBOOK, RUN, PHASE) == artifact
+    assert store.writes == []
 
 
 def test_large_private_proof_round_trip_splits_objects_below_generic_storage_read_limit():
@@ -82,24 +110,26 @@ def fake_journal(rows):
     return read
 
 
-def test_recovered_sheet_keeps_one_small_native_receipt_with_exact_full_artifact_readback():
+@pytest.mark.parametrize('workbook', [gate.RECOVERED_WORKBOOK, gate.FROZEN_WORKBOOK])
+def test_operational_workbook_keeps_one_small_native_receipt_with_exact_full_artifact_readback(workbook):
     store, rows = Store(), [gate.HEADERS]
     artifact = {'observed_at': '2026-11-17T23:00:00Z', 'complete': False,
                 'literal_receipts': ['uncertain', 'held', 'sent'] * 10000}
     with mock.patch.object(proof, 'objects', return_value=store), \
          mock.patch.object(gate, 'batch_read', side_effect=fake_journal(rows)), \
          mock.patch.object(gate.sheets, 'append_values', side_effect=lambda *args: rows.extend(args[3])):
-        digest = gate.journal_write('token', gate.RECOVERED_WORKBOOK, RUN, AUTO, PHASE, artifact)
+        digest = gate.journal_write('token', workbook, RUN, AUTO, PHASE, artifact)
         assert len(rows) == 2 and rows[1][4] == digest
         assert rows[1][7].startswith(proof.MARKER)
-        assert gate.journal_read('token', gate.RECOVERED_WORKBOOK, RUN, PHASE) == artifact
+        assert gate.journal_read('token', workbook, RUN, PHASE) == artifact
 
 
-def test_storage_failure_cannot_append_a_native_positive_proof_reference():
+@pytest.mark.parametrize('workbook', [gate.RECOVERED_WORKBOOK, gate.FROZEN_WORKBOOK])
+def test_storage_failure_cannot_append_a_native_positive_proof_reference(workbook):
     with mock.patch.object(proof, 'objects', side_effect=RuntimeError('storage unavailable')), \
          mock.patch.object(gate.sheets, 'append_values') as append:
         with pytest.raises(RuntimeError, match='storage unavailable'):
-            gate.journal_write('token', gate.RECOVERED_WORKBOOK, RUN, AUTO, PHASE,
+            gate.journal_write('token', workbook, RUN, AUTO, PHASE,
                                {'observed_at': '2026-11-17T23:00:00Z'})
         append.assert_not_called()
 

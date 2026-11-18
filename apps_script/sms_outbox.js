@@ -298,6 +298,7 @@ function queueCoalescedHandoffEmailV18_(payload) {
 }
 
 function drainHandoffEmailOutboxV11_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true, processed: 0 };
   reconcileUncertainHandoffEmailV11_();
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_handoff_email_outbox");
@@ -2257,6 +2258,7 @@ function buildSmsInboundContentFingerprint_(phone, message) {
 }
 
 function processSmsInboundQueue_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true, processed: 0 };
   var started = Date.now();
   var processed = 0;
   while (processed < 4 && Date.now() - started < 4.5 * 60 * 1000) {
@@ -3670,6 +3672,7 @@ function getTaskerTransportHealthV12_(nowOverride) {
 }
 
 function monitorTaskerTransportHealthV12_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true };
   try { if (typeof flushSendStartDiagnosticsV35_ === "function") flushSendStartDiagnosticsV35_(); } catch (_) {}
   try { flushSmsStorageRecoveryV37_(); } catch (_) {}
   try { monitorSmsClaimStorageV36_(); } catch (_) {}
@@ -3704,6 +3707,7 @@ function monitorTaskerTransportHealthV12_() {
 }
 
 function smsOutboxWatchdog_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true };
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return;

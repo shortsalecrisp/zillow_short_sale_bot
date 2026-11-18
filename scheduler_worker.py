@@ -210,7 +210,7 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
                 sys.executable,
                 script_path,
                 "--spreadsheet-id",
-                os.getenv("GSHEET_ID", "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE"),
+                os.getenv("GSHEET_ID", "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"),
                 "--main-tab",
                 os.getenv("GSHEET_TAB", "Sheet1"),
                 "--pilot-tab",

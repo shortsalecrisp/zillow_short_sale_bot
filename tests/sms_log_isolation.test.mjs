@@ -98,6 +98,13 @@ test("the authorization helper is read-only and checks the exact recovered workb
   vm.runInContext(pick(diagnostic, "authorizeRecoveredWorkbook"), context);
   assert.equal(context.authorizeRecoveredWorkbook().read_only, true);
   assert.equal(messages[0].sender_calls, 0);
+  context.smsMigrationWorkbookIdV1_ = () => "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70";
+  context.getSmsSpreadsheet_ = () => ({
+    getId: context.smsMigrationWorkbookIdV1_,
+    getSheetByName: () => ({ getMaxRows: () => 4518 }),
+  });
+  assert.equal(context.authorizeRecoveredWorkbook().read_only, true);
+  assert.equal(messages.at(-1).workbook_id, context.smsMigrationWorkbookIdV1_());
   context.getSmsSpreadsheet_ = () => ({ getId: () => "wrong" });
   assert.throws(() => context.authorizeRecoveredWorkbook(), /Unexpected operational workbook/);
 });

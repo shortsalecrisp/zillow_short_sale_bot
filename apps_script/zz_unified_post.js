@@ -57,6 +57,10 @@ function isUnauthorizedError_(err) {
 
 function handleUnifiedVoicePost_(payload) {
   try {
+    if (typeof smsMigrationVoiceGateV1_ === "function") {
+      var migrationResult = smsMigrationVoiceGateV1_(payload);
+      if (migrationResult) return jsonOutput_(migrationResult);
+    }
     if (typeof isVoiceBotQueueDryRunPayload_ === "function" && isVoiceBotQueueDryRunPayload_(payload)) {
       validateVoiceBotQueueRefillPayload_(payload);
       return jsonOutput_(processVoiceBotCallQueueDryRun());
@@ -931,6 +935,7 @@ function ensurePendingSmsHeaders_(sheet, headers) {
 // Install this as a time-driven trigger once. It alerts only once per missed
 // callback, so a transient Tasker delay cannot create an email storm.
 function smsPendingSendWatchdog_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true };
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return;

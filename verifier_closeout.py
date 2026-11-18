@@ -236,7 +236,13 @@ def journal_read(token, sid, run_id, phase):
     payloads = batch_read(token, sid, [f"'{TAB}'!H{number}:H{number}" for number, _ in parts])
     if any(not block or not block[0] or not isinstance(block[0][0], str) for block in payloads):
         raise ValueError('incomplete_immutable_gate_artifact')
-    locator = ''.join(block[0][0] for block in payloads)
+    values = [block[0][0] for block in payloads]
+    from verifier_proof_storage import HISTORY_MARKER, history_parts
+    if any(value.startswith(HISTORY_MARKER) for value in values):
+        if not all(value.startswith(HISTORY_MARKER) for value in values):
+            raise ValueError('mixed_historical_proof_locator')
+        values = history_parts(values, [row for _, row in parts])
+    locator = ''.join(values)
     from verifier_proof_storage import MARKER, read
     if locator.startswith(MARKER):
         if len(parts) != 1:
@@ -252,7 +258,8 @@ def journal_read(token, sid, run_id, phase):
 def journal_write(token, sid, run_id, automation, phase, artifact):
     encoded = json.dumps(artifact, separators=(',', ':')).encode()
     digest = hashlib.sha256(encoded).hexdigest()
-    if sid == RECOVERED_WORKBOOK:
+    # A restored original must retain compact proof storage too.
+    if sid in {RECOVERED_WORKBOOK, FROZEN_WORKBOOK}:
         from verifier_proof_storage import write
         parts = [write(encoded, run_id, automation, phase)]
     else:

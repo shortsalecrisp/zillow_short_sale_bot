@@ -111,7 +111,8 @@ function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
 // This helper never writes lead data, executes a queue or sends a message.
 function authorizeRecoveredWorkbook() {
   var book = getSmsSpreadsheet_();
-  if (book.getId() !== "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE") {
+  var expected = typeof smsMigrationWorkbookIdV1_ === "function" ? smsMigrationWorkbookIdV1_() : "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE";
+  if (book.getId() !== expected) {
     throw new Error("Unexpected operational workbook; authorization check stopped");
   }
   var sheet = book.getSheetByName("sms_pending_sends");
