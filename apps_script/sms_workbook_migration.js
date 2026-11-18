@@ -115,6 +115,15 @@ function smsMigrationControlV1_(body) {
   var props = PropertiesService.getScriptProperties(), command = String(body.migration_control || "");
   if (!body.api_key || body.api_key === props.getProperty("ALLOWED_TOKEN") || smsMigrationHashV1_(String(body.api_key)) !== SMS_MIGRATION_ADMIN_SHA256_V1_) throw new Error("Migration administrator authorization required");
   if (command === "status") return smsMigrationStatusV1_();
+  if (command === "native_metadata") {
+    var id = body.original === true ? SMS_MIGRATION_TARGET_V1_ : SMS_MIGRATION_SOURCE_V1_;
+    var fields = "spreadsheetId,properties,namedRanges,developerMetadata,sheets(properties,basicFilter,conditionalFormats,merges,charts,bandedRanges,protectedRanges,filterViews,tables,rowGroups,columnGroups,data(startRow,startColumn,rowMetadata,columnMetadata))";
+    var response = UrlFetchApp.fetch("https://sheets.googleapis.com/v4/spreadsheets/" + id + "?includeGridData=true&fields=" + encodeURIComponent(fields), {
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+    });
+    if (response.getResponseCode() !== 200) throw new Error("Native metadata read failed: HTTP " + response.getResponseCode());
+    return { ok: true, metadata: JSON.parse(response.getContentText()), read_only: true };
+  }
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw new Error("Migration control busy");
   try {
