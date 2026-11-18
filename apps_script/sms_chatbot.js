@@ -331,6 +331,11 @@ function isAlreadyReviewedRepeatedQuestion_(rowObj, inboundText) {
 }
 
 function parseIncomingRequest_(e) {
+  var body = parseIncomingRequestCoreV37_(e);
+  return typeof smsMigrationGateRequestV1_ === "function" ? smsMigrationGateRequestV1_(body) : body;
+}
+
+function parseIncomingRequestCoreV37_(e) {
   const raw = e && e.postData && typeof e.postData.contents === "string"
     ? e.postData.contents
     : "";
@@ -2228,6 +2233,7 @@ function clearPendingSmsControlEventV11_(phone, eventId) {
 }
 
 function drainPendingSmsControlEventsV11_() {
+  if (typeof smsMigrationActiveV1_ === "function" && smsMigrationActiveV1_()) return { ok: true, maintenance: true, processed: 0 };
   const props = PropertiesService.getScriptProperties();
   const all = props.getProperties();
   const prefix = "SMS_PENDING_CONTROL_V11_";
@@ -7836,7 +7842,8 @@ function extractOutputText_(parsed) {
 
 function getSmsSpreadsheet_() {
   // Keep the existing Tasker web app bound to the verified operational copy.
-  var ss = SpreadsheetApp.openById("1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE");
+  var id = typeof smsMigrationWorkbookIdV1_ === "function" ? smsMigrationWorkbookIdV1_() : "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE";
+  var ss = SpreadsheetApp.openById(id);
   if (!ss) {
     throw new Error("Operational spreadsheet not available");
   }
@@ -7970,6 +7977,7 @@ function normalizeWhitespace_(s) {
 }
 
 function jsonOutput_(obj) {
+  if (typeof smsMigrationOutputV1_ === "function") obj = smsMigrationOutputV1_(obj);
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
