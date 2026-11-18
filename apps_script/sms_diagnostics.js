@@ -47,7 +47,12 @@ function writeSmsDiagnosticV37_(stage, data) {
 
 function isSmsStorageErrorV37_(subject, body) {
   return String(subject || "") === "SMS BOT ERROR" &&
-    /The document cannot be modified|Service Spreadsheets failed|Spreadsheet service.*(?:failed|unavailable)/i.test(String(body || ""));
+    (/The document cannot be modified|Service Spreadsheets failed|Spreadsheet service.*(?:failed|unavailable)/i.test(String(body || "")) ||
+      isSmsWorkbookAuthorizationErrorV38_(body));
+}
+
+function isSmsWorkbookAuthorizationErrorV38_(body) {
+  return /permission[^\n]*SpreadsheetApp\.(?:openById|openByUrl)[\s\S]*Required permissions:[^\n]*googleapis\.com\/auth\/spreadsheets/i.test(String(body || ""));
 }
 
 function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
@@ -58,18 +63,25 @@ function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
   }
   var notice = null;
   var noticeAt = 0;
+  var authorizationRequired = isSmsWorkbookAuthorizationErrorV38_(body);
   try {
     var props = PropertiesService.getScriptProperties();
     var now = Date.now();
     var state = JSON.parse(props.getProperty("SMS_STORAGE_INCIDENT_V37") || "null");
     if (!state || state.status !== "open") state = { status: "open", first_at: now, count: 0 };
+    var cause = authorizationRequired ? "spreadsheet_authorization" : "spreadsheet_storage";
+    if (state.current_cause && state.current_cause !== cause) state.notice_attempt_at = 0;
+    state.current_cause = cause;
     state.count = Math.min(Number(state.count || 0) + 1, 1000000000);
     state.last_at = now;
     if (!state.notice_attempt_at || now - state.notice_attempt_at >= 30 * 60 * 1000) {
       state.notice_attempt_at = now;
       state.notice_state = "attempted";
       noticeAt = now;
-      notice = "SMS storage outage: new queue entries may be blocked. This is not agent interest or confirmed delivery.\n\n" +
+      notice = (authorizationRequired
+        ? "Google authorization is required for the server script to open the recovered workbook. No Tasker update is needed. New queue entries are blocked until authorization is completed. "
+        : "SMS storage outage: new queue entries may be blocked. ") +
+        "This is not agent interest or confirmed delivery.\n\n" +
         "Failures observed in this incident: " + state.count + "\n" +
         "First observed: " + new Date(state.first_at).toISOString() + "\n" +
         "Do not resend blindly. Reconcile the original request and safety checks.\n\n" + smsDiagnosticTextV37_(body, 4000);
@@ -78,7 +90,9 @@ function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
     try { writeSmsDiagnosticV37_("storage_incident", { count: state.count, reason: body }); } catch (_) {}
   } finally { lock.releaseLock(); }
   if (!notice) return false;
-  MailApp.sendEmail({ to: toEmail, subject: "SMS BOT ERROR - storage outage", body: notice });
+  MailApp.sendEmail({ to: toEmail,
+    subject: authorizationRequired ? "SMS BOT ERROR - spreadsheet authorization" : "SMS BOT ERROR - storage outage",
+    body: notice });
   // The attempted marker already prevents blind notification retries on errors.
   if (lock.tryLock(100)) {
     try {
@@ -91,6 +105,21 @@ function sendCoalescedSmsStorageAlertV37_(body, toEmail) {
     } finally { lock.releaseLock(); }
   }
   return true;
+}
+
+// Run only from the owner-authorized editor to grant/check the existing scope.
+// This helper never writes lead data, executes a queue or sends a message.
+function authorizeRecoveredWorkbook() {
+  var book = getSmsSpreadsheet_();
+  if (book.getId() !== "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE") {
+    throw new Error("Unexpected operational workbook; authorization check stopped");
+  }
+  var sheet = book.getSheetByName("sms_pending_sends");
+  if (!sheet) throw new Error("Recovered outbox is missing");
+  var result = { ok: true, workbook_id: book.getId(), read_only: true,
+    outbox_capacity: sheet.getMaxRows(), sender_calls: 0, tasker_changes: 0 };
+  Logger.log(JSON.stringify(result));
+  return result;
 }
 
 function noteSmsStorageWriteV37_(requestId) {

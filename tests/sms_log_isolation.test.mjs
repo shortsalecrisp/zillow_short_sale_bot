@@ -75,6 +75,33 @@ test("uncertain email acceptance is never blindly repeated or marked delivered",
   assert.equal(JSON.parse(h.values.SMS_STORAGE_INCIDENT_V37).notice_state, "attempted");
 });
 
+test("missing workbook authorization is grouped without hiding unrelated permission failures", () => {
+  const h = fixture();
+  const error = "Exception: You do not have permission to call SpreadsheetApp.openById. Required permissions: https://www.googleapis.com/auth/spreadsheets";
+  for (let i = 0; i < 20; i++) h.context.sendSystemAlertEmail_("SMS BOT ERROR", error);
+  assert.equal(h.mails.length, 1);
+  assert.equal(h.mails[0].subject, "SMS BOT ERROR - spreadsheet authorization");
+  assert.match(h.mails[0].body, /No Tasker update is needed/);
+  assert.equal(JSON.parse(h.values.SMS_STORAGE_INCIDENT_V37).count, 20);
+  h.context.sendSystemAlertEmail_("SMS BOT ERROR", "You do not have permission to call MailApp.sendEmail");
+  assert.equal(h.mails.length, 2);
+});
+
+test("the authorization helper is read-only and checks the exact recovered workbook", () => {
+  const messages = [];
+  const context = { Logger: { log: line => messages.push(JSON.parse(line)) },
+    getSmsSpreadsheet_: () => ({
+      getId: () => "1rbffUky_CpaC0O9HxtChBlIet4BYB1Tu1ul1j8R_pSE",
+      getSheetByName: name => name === "sms_pending_sends" ? { getMaxRows: () => 4478 } : null,
+    }) };
+  vm.createContext(context);
+  vm.runInContext(pick(diagnostic, "authorizeRecoveredWorkbook"), context);
+  assert.equal(context.authorizeRecoveredWorkbook().read_only, true);
+  assert.equal(messages[0].sender_calls, 0);
+  context.getSmsSpreadsheet_ = () => ({ getId: () => "wrong" });
+  assert.throws(() => context.authorizeRecoveredWorkbook(), /Unexpected operational workbook/);
+});
+
 test("only a later successful queue write can cause the one recovery notice", () => {
   const h = fixture();
   h.context.sendSystemAlertEmail_("SMS BOT ERROR", "Service Spreadsheets failed");
