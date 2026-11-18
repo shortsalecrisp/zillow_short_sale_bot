@@ -4624,7 +4624,8 @@ def test_sms_agent_will_call_gets_number_without_invented_callback(monkeypatch):
     decision = module._sms_fast_decision({}, "I will call you")
 
     assert module._sms_is_self_initiated_deferred_contact("I will call you") is True
-    assert decision["handoff_type"] == ""
+    assert decision["handoff_type"] == "DEFERRED HOT LEAD"
+    assert decision["alert_needed"] is True
     assert decision["handoff_needed"] is False
     assert decision["call_booking_status"] == "interested_no_call"
     assert decision["callback_time"] == ""

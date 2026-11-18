@@ -6003,7 +6003,7 @@ def _sms_decision(
         "reply_text": reply_text,
         "lead_status": normalized_status,
         "conversation_done": conversation_done,
-        "handoff_needed": handoff_needed or needs_review or alert_needed,
+        "handoff_needed": handoff_needed or needs_review or (alert_needed and response_id != "self_initiated_contact_ack"),
         "needs_review": needs_review,
         "block_reply": block_reply,
         "reason": reason,
@@ -6371,6 +6371,7 @@ def _sms_is_opt_out(value: Any) -> bool:
         return True
     patterns = [
         r"^stop[.!?]*$",
+        r"^no\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$",
         r"^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+",
         r"[.!?,;:\u2014-]\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$",
         r"^unsubscribe[.!?]*$",
@@ -8209,6 +8210,7 @@ def _sms_fast_decision(
     )
     if (
         terminal_statement
+        and not (_sms_is_self_initiated_deferred_contact(t) and not _sms_is_unmistakable_terminal_rejection(t))
         and not _sms_is_substantive_followup(t)
         and not _sms_is_fee_question(t)
         and not _sms_is_information_delivery_request(t)
@@ -8481,14 +8483,15 @@ def _sms_fast_decision(
         )
 
     if _sms_is_self_initiated_deferred_contact(t):
+        call_promise = bool(re.search(r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:(?:call|phone|ring)\s+you|give\s+you\s+a\s+call)\b", t))
         return _sms_decision(
             reply_text="Sounds good—I’ll be here when you’re ready.",
             response_id="self_initiated_contact_ack",
             lead_status="Y",
             handoff_needed=False,
-            alert_needed=False,
+            alert_needed=call_promise,
             call_booking_status="interested_no_call",
-            handoff_type="",
+            handoff_type="DEFERRED HOT LEAD" if call_promise else "",
             reason="Agent will initiate contact later; acknowledged without a callback question or owner takeover",
         )
 
@@ -8892,7 +8895,7 @@ def _sms_enforce_durable_followup_promise(decision: Dict[str, Any], inbound_text
 def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:
     if auto_reply_count >= 3 and not decision.get("bypass_reply_cap"):
         return False
-    terminal_handoff = decision.get("handoff_needed") or decision.get("needs_review") or decision.get("alert_needed")
+    terminal_handoff = decision.get("handoff_needed") or decision.get("needs_review") or (decision.get("alert_needed") and decision.get("response_id") != "self_initiated_contact_ack")
     if terminal_handoff and not decision.get("send_reply_before_handoff"):
         return False
     if decision.get("block_reply"):
@@ -9442,7 +9445,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     reason = str(decision.get("reason") or "")
 
     preserve_existing_state = bool(decision.get("preserve_existing_state"))
-    terminal_handoff = handoff_needed or needs_review or bool(decision.get("alert_needed"))
+    terminal_handoff = handoff_needed or needs_review or (bool(decision.get("alert_needed")) and decision.get("response_id") != "self_initiated_contact_ack")
     updates = {} if preserve_existing_state else {
         "response_status": inbound_text,
         "mailshake_status": lead_status,

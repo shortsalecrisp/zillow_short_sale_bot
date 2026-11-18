@@ -597,6 +597,22 @@ def test_trailing_standalone_stop_overrides_self_handler_decline(chatbot):
     assert result["handoff_needed"] is False
 
 
+def test_flattened_no_stop_is_silent(chatbot):
+    result = chatbot.receive("No Stop")
+    assert result["should_reply"] is False
+    assert chatbot.row()["human_override"] == "TRUE"
+    assert chatbot.module._sms_is_opt_out("Can you stop foreclosure?") is False
+
+
+def test_arica_polite_preamble_does_not_close_call_promise(chatbot):
+    result = chatbot.receive("Hello! Thanks for reaching out. I will give you a call in a bit.")
+    assert result["lead_status"] == "Y"
+    assert result["handoff_needed"] is False
+    assert result["alert_needed"] is True
+    assert chatbot.row()["call_booking_status"] == "interested_no_call"
+    assert chatbot.row().get("callback_requested") != "yes"
+
+
 def test_unmonitored_inbox_phone_menu_is_silent_without_handoff(chatbot):
     chatbot.set(auto_reply_count="3", call_booking_status="not_requested")
     result = chatbot.receive(

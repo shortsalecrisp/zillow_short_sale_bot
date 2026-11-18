@@ -1627,7 +1627,7 @@ function handleIncomingSmsCore_(body) {
 
     if (!decision.preserve_existing_state) {
       updates[HEADERS.mailshake_status] = decision.lead_status;
-      const terminalHandoff = decision.handoff_needed || decision.needs_review || decision.alert_needed;
+      const terminalHandoff = decision.handoff_needed || decision.needs_review || (decision.alert_needed && decision.response_id !== "self_initiated_contact_ack");
       updates[HEADERS.ai_state] = terminalHandoff ? "handoff" : (decision.conversation_done ? "done" : "active");
       updates[HEADERS.handoff_flag] = terminalHandoff ? "TRUE" : "FALSE";
       updates[HEADERS.human_override] = terminalHandoff ? "TRUE" : "FALSE";
@@ -1946,7 +1946,7 @@ function shouldSendBotReply_(decision, capReached) {
   }
 
   const d = decision || {};
-  if ((d.handoff_needed || d.needs_review || d.alert_needed) && !d.send_reply_before_handoff) {
+  if ((d.handoff_needed || d.needs_review || (d.alert_needed && d.response_id !== "self_initiated_contact_ack")) && !d.send_reply_before_handoff) {
     return false;
   }
   if (d.block_reply) {
@@ -2301,6 +2301,7 @@ function isOptOutSignal_(text) {
 
   const patterns = [
     /^stop[.!?]*$/,
+    /^no\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$/,
     /^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+/,
     /[.!?,;:\u2014-]\s+(?:stop|unsubscribe|opt\s+out)[.!?]*$/,
     /^unsubscribe[.!?]*$/,
@@ -2741,6 +2742,7 @@ function buildAmbiguousShortSaleCorrectionDecision_(text, rowObj) {
 
 function buildTerminalCoverageDecisionV4_(text, rowObj) {
   const t = withoutNegatedRejection_(text);
+  if (isSelfInitiatedDeferredContactSignal_(t) && !isUnmistakableTerminalRejectionSignal_(t)) return null;
   if (isShortSaleSourceQuestion_(t) || isEmailRequestSignal_(t) || extractEmailAddress_(t) ||
       isExistingCrispRelationshipSignal_(t) || isClientConsultationInterestSignal_(t) ||
       isFutureNegotiationInterestSignal_(t) || isRelationshipOnlyAfterExistingCoverageSignal_(t, rowObj) ||
@@ -3648,6 +3650,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   }
 
   if (isSelfInitiatedDeferredContactSignal_(t)) {
+    const callPromise = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:(?:call|phone|ring)\s+you|give\s+you\s+a\s+call)\b/.test(t);
     return {
       matched: true,
       reply_text: "Sounds good—I’ll be here when you’re ready.",
@@ -3655,10 +3658,11 @@ function applyFastRules_(text, rowObj, receivedAt) {
       conversation_done: false,
       handoff_needed: false,
       needs_review: false,
-      alert_needed: false,
+      alert_needed: callPromise,
       block_reply: false,
       call_booking_status: "interested_no_call",
       response_id: "self_initiated_contact_ack",
+      handoff_type: callPromise ? "DEFERRED HOT LEAD" : "",
       reason: "Agent will initiate contact later; acknowledged without a callback question or owner takeover"
     };
   }
@@ -6132,7 +6136,7 @@ function normalizeAiDecision_(decision, existingStatus) {
   normalized.conversation_done = !!normalized.conversation_done;
   normalized.alert_needed = !!normalized.alert_needed;
   normalized.handoff_needed = !!normalized.handoff_needed || normalized.lead_status === "G" ||
-    !!normalized.needs_review || normalized.alert_needed;
+    !!normalized.needs_review || (normalized.alert_needed && normalized.response_id !== "self_initiated_contact_ack");
   normalized.needs_review = !!normalized.needs_review;
   normalized.block_reply = !!normalized.block_reply;
   normalized.reply_text = typeof normalized.reply_text === "string" ? normalized.reply_text : "";

@@ -2468,6 +2468,10 @@ function coalesceSmsInboundFragmentTextsV10_(fragmentTexts) {
     }
   }
 
+  // Preserve the boundary of a final opt-out bubble for the intent guard.
+  if (fragments.length > 1 && /^(?:stop|unsubscribe|opt\s+out)[.!?]*$/i.test(fragments[fragments.length - 1])) {
+    return fragments.join(". ");
+  }
   return fragments.join(" ");
 }
 
