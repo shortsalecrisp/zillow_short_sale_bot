@@ -33,6 +33,7 @@ const POLICY_STRATIFICATION_INSTRUCTIONS =
 const CODEX_ANALYSIS_INSTRUCTIONS =
   "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. " +
   "For contact-evidence-v2 blocks, use contactEvidence instead of provider call status or rawSignals.hasMeaningfulUserTranscript to count human contact. The legacy flags.liveAnswered now means apparent human speech, including separately labeled gatekeepers; targetAgentAnswered requires transcript identity/role evidence. Null means unknown, never zero. Greeting-only contact is apparent, not authenticated. Older blocks without contactEvidence require transcript reclassification; do not pool their inflated liveAnswered flag. Automated replies never count as agent engagement. Latency fields are transcript turn-start differences, not acoustic response gaps. " +
+  "openingMeasurementRevision listing-opening-evidence-v1 recognizes the uniform listing question across script revisions. Earlier r15-r21 opening/reason flags used a stale policy list and require final-transcript remeasurement before funnel comparison; do not rewrite consent, identity, outcomes or cohort membership from these delivery flags. " +
   POLICY_STRATIFICATION_INSTRUCTIONS + " " +
   "For handoff-evidence-v3 blocks, use handoffEvidence for requests, receipts and completion separately. callbackToolFired is an attempted tool action, not caller consent. callbackRequested requires actual caller consent; callbackRequestCaptured additionally requires requestCaptured true in a matching final receipt. callbackCompleted and positiveHandoffVerified remain unknown without owner completion evidence. Transfer completion requires clear live-now consent plus a successful transfer_to_number result in a matching final receipt; summary/outcome labels alone are insufficient. contactEvidence.reviewBucket separates target_live, human_gatekeeper, apparent_human, recorded_screener, voicemail, ivr and unknown. Exclude recorded_screener and human_gatekeeper from the per-arm true-live winner gate. " +
   "Compare voiceVariant on live answered calls separately from voicemail/no-answer within historical voice-test strata, and compare scheduledWindow by agent local time bucket without treating observational differences as causal lift. For the historical Eryn/Finch comparison, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current calls under eryn-self-handler-ai-optout-20260925 should show Eryn/Maya only; if Finch appears after that policy, flag it as a production configuration issue instead of an experiment result. Also compare call.openerVariant as the post-intro continuation assignment within policy/provider and joint-arm strata: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline with policy/provider strata kept separate, and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
@@ -471,24 +472,10 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
   const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(humanTranscript, "");
   const callbackOrLaterSignal = contact.humanAnswered === true && hasCallbackOrLaterSignal(humanTranscript, "");
-  const usesServiceFirstOpening = [
-    "maya-service-first-recovery-20261003",
-    "maya-uniform-lead-conversion-20261009",
-    "maya-uniform-lead-conversion-20261009-r2",
-    "maya-uniform-lead-conversion-20261011-r3",
-    "maya-uniform-lead-conversion-20261016-r4",
-    "maya-uniform-lead-conversion-20261017-r5",
-    "maya-uniform-lead-conversion-20261019-r6",
-    "maya-uniform-lead-conversion-20261023-r7",
-    "maya-uniform-lead-conversion-20261027-r8",
-    "maya-uniform-lead-conversion-20261028-r9",
-    "maya-uniform-lead-conversion-20261029-r10",
-    "maya-uniform-lead-conversion-20261029-r11",
-    "maya-uniform-lead-conversion-20261029-r12",
-    "maya-uniform-lead-conversion-20261030-r13",
-    "maya-uniform-lead-conversion-20261102-r14",
-  ]
-    .includes(input.metadata.declaredConversationPolicyVersion ?? "");
+  // Wording belongs to the policy family, not a revision allowlist. Provider/cohort admission stays exact.
+  const policy = input.metadata.declaredConversationPolicyVersion ?? "";
+  const usesServiceFirstOpening = policy === "maya-service-first-recovery-20261003" ||
+    /^maya-uniform-lead-conversion-\d{8}(?:-r[1-9]\d*)?$/.test(policy);
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
     liveSpeechTranscript,
@@ -535,6 +522,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const payload = {
     schema: "voice_call_metrics_v1",
     measurementRevision: "handoff-evidence-v3",
+    openingMeasurementRevision: "listing-opening-evidence-v1",
     codexInstructions: CODEX_ANALYSIS_INSTRUCTIONS,
     abTestScope: {
       cohort: VOICE_AB_TEST_COHORT,

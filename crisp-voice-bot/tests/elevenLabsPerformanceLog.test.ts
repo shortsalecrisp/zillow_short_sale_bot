@@ -820,6 +820,19 @@ for (const policy of [
   "maya-uniform-lead-conversion-20261023-r7",
   "maya-uniform-lead-conversion-20261027-r8",
   "maya-uniform-lead-conversion-20261028-r9",
+  "maya-uniform-lead-conversion-20261029-r10",
+  "maya-uniform-lead-conversion-20261029-r11",
+  "maya-uniform-lead-conversion-20261029-r12",
+  "maya-uniform-lead-conversion-20261030-r13",
+  "maya-uniform-lead-conversion-20261102-r14",
+  "maya-uniform-lead-conversion-20261103-r15",
+  "maya-uniform-lead-conversion-20261104-r16",
+  "maya-uniform-lead-conversion-20261105-r17",
+  "maya-uniform-lead-conversion-20261105-r18",
+  "maya-uniform-lead-conversion-20261111-r19",
+  "maya-uniform-lead-conversion-20261113-r20",
+  "maya-uniform-lead-conversion-20261116-r21",
+  "maya-uniform-lead-conversion-20990101-r999",
 ]) {
 test(`${policy} measures service and listing question while yes only confirms the listing`, async () => {
   const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: policy }, conversation: { transcript: [
@@ -834,6 +847,91 @@ test(`${policy} measures service and listing question while yes only confirms th
   assert.equal(result.flags.callbackRequested, false);
 });
 }
+
+for (const sample of [
+  { name: "Arshia", question: "Is Fourteen Thirty Seven One Wood Sugar your listing?", answer: "Yes.",
+    needs: "Would help with lender paperwork or calls be useful for this listing?", reply: undefined },
+  { name: "Joshua", question: "Is Twelve Sixty Four One Mourning Dove your listing?", answer: "That is my listing.",
+    needs: "Would help with lender paperwork or calls be useful for this listing?", reply: "No." },
+  { name: "Elena", question: "Is Thirty Nine Valiant Ridge your listing?", answer: "Yeah.",
+    needs: "Would help with lender paperwork or calls be useful for ...", reply: undefined },
+]) {
+  test(`r21 ${sample.name} answered listing check is not a hangup before opening`, async () => {
+    const { VOICE_CONVERSATION_POLICY_VERSION } = await import("../src/lib/elevenLabsConversationPolicy");
+    const result = await measurementLog({ metadata: { fullName: `${sample.name} Synthetic`,
+      initialOpeningPolicy: "listen_first_listing_agent_v2", declaredConversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION },
+      conversation: { metadata: { call_duration_secs: 23, termination_reason: "Client disconnected: 1000" }, transcript: [
+        { role: "user", message: `This is ${sample.name}.`, time_in_call_secs: 0 },
+        { role: "agent", message: sample.question, time_in_call_secs: 2 },
+        { role: "user", message: sample.answer, time_in_call_secs: 6 },
+        { role: "agent", message: sample.needs, time_in_call_secs: 8 },
+        ...(sample.reply ? [{ role: "user", message: sample.reply, time_in_call_secs: 12 }] : []),
+      ] } });
+    assert.equal(result.openingMeasurementRevision, "listing-opening-evidence-v1");
+    assert.equal(result.flags.openingQuestionDelivered, true);
+    assert.equal(result.flags.agentRespondedAfterOpeningQuestion, true);
+    assert.equal(result.flags.hangupBeforeOpeningQuestion, false);
+    assert.equal(result.metrics.openingQuestionAtSecs, 2);
+    assert.equal(result.contactEvidence.targetAgentAnswered, true);
+    assert.equal(result.flags.needsQuestionDelivered, !sample.needs.endsWith("..."));
+    assert.equal(result.flags.agentRespondedAfterNeedsQuestion, Boolean(sample.reply));
+    assert.equal(result.flags.reasonDelivered, false, "A listing check is not the service explanation");
+    assert.equal(result.flags.clearLiveTransferConsent, false);
+    assert.equal(result.flags.callbackRequested, false);
+  });
+}
+
+test("uniform opening measurement rejects truncated questions and policy-only delivery claims", async () => {
+  for (const message of [undefined, "Hi, Maya with Crisp Short Sales.", "Is Thirty Six Fifty Nine Yale your lis..."]) {
+    const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20261116-r21" },
+      conversation: { metadata: { call_duration_secs: 6, termination_reason: "Client disconnected: 1000" }, transcript: [
+        { role: "user", message: "Hello?", time_in_call_secs: 0 },
+        ...(message ? [{ role: "agent", message, time_in_call_secs: 2 }] : []),
+      ] } });
+    assert.equal(result.flags.openingQuestionDelivered, false);
+    assert.equal(result.flags.agentRespondedAfterOpeningQuestion, false);
+    assert.equal(result.metrics.openingQuestionAtSecs, null);
+    assert.equal(result.flags.hangupBeforeOpeningQuestion, true);
+  }
+});
+
+test("screening and voicemail cannot supply live opening delivery or response credit", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Elena Synthetic",
+    declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20261116-r21" }, conversation: { transcript: [
+      { role: "user", message: "Please state your name and reason for calling, then stay on the line." },
+      { role: "agent", message: "We help with short-sale lender paperwork. Is 123 Fictional Street your listing?" },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+      { role: "user", message: "This is Elena." },
+      { role: "agent", message: "Is 123 Fictional Street your lis..." },
+    ] } });
+  assert.equal(result.flags.openingQuestionDelivered, false);
+  assert.equal(result.flags.agentRespondedAfterOpeningQuestion, false);
+  assert.equal(result.flags.reasonDelivered, false);
+  const recorded = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20261116-r21" },
+    terminalCallResult: "voicemail_left", conversation: { transcript: [
+      { role: "user", message: "Please leave your name and number after the tone." },
+      { role: "agent", message: "We help with short-sale lender paperwork. Is 123 Fictional Street your listing?" },
+      { role: "user", message: "Your message has been sent. Goodbye." },
+    ] } });
+  assert.equal(recorded.flags.openingQuestionDelivered, false);
+  assert.equal(recorded.flags.agentRespondedAfterOpeningQuestion, false);
+  assert.equal(recorded.flags.reasonDelivered, false);
+});
+
+test("future uniform policy wording recognition does not admit unknown final provider versions", async () => {
+  const result = await measurementLog({ metadata: { testMode: false, providerProofCall: false,
+    declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20990101-r999" },
+    conversation: { agent_id: "agent_unknown", branch_id: "branch_unknown", version_id: "version_unknown",
+      metadata: { start_time_unix_secs: 1794967500, call_duration_secs: 20 }, transcript: [
+      { role: "user", message: "Hello." },
+      { role: "agent", message: "Is 123 Fictional Street your listing?" },
+      { role: "user", message: "Yes." },
+    ] } });
+  assert.equal(result.flags.openingQuestionDelivered, true);
+  assert.equal(result.providerIdentity.versionId, "version_unknown");
+  assert.equal(result.call.testMode, false);
+  assert.equal(result.ttsModelExperiment.uniformComparison.eligibleArm, null);
+});
 
 test("uniform conversion measures the needs question separately and excludes proof calls", async () => {
   const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20261009", providerProofCall: true }, conversation: { transcript: [

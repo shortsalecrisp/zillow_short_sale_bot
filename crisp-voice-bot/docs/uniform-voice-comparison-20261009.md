@@ -37,6 +37,30 @@ unaccepted zero-duration failures excluded, separately. Caller-consented callbac
 Yoni's owner-confirmed completed callback and interest, and provider-completed transfers
 remain separate outcomes. No historical calls are admitted to r21.
 
+## Approved Backend-Only Opening Measurement Repair, November 17
+
+Yoni approved correcting the shared metrics detector after exact r21 final transcripts
+for rows 6929, 6930 and 6905 showed answered listing questions while their metrics
+reported `openingQuestionDelivered=false` and `hangupBeforeOpeningQuestion=true`.
+The old service-first policy allowlist stopped at r14. The detector now recognizes the
+uniform policy family without enumerating revisions, while still requiring the actual
+complete assistant question in the live portion of the transcript. Interrupted questions,
+recordings, screening speech and declared policy labels alone do not prove delivery.
+The listing question remains distinct from the service explanation and needs question.
+
+New logs add `openingMeasurementRevision: listing-opening-evidence-v1`; the handoff
+schema and all consent, provider-identity and exact cohort-admission rules are unchanged.
+Older r15-r21 opening/reason flags require final-transcript remeasurement before funnel
+comparison. This release does not automatically rewrite historical Sheet artifacts.
+Regression tests cover all published policy revisions, the current policy, a future
+revision, the three incident transcripts, interrupted delivery and recorded/screened
+speech. Wording recognition for an unknown version does not admit it to the comparison.
+
+This is backend measurement only: r21's boundary, exact paired provider versions, hashes,
+native 50/50 allocation, prompts, workflows, tools, audio, safeguards, local windows,
+monitor schedule and notification settings are unchanged. Read-only receipt replay is
+not a new call, acoustic proof, callback completion or transfer evidence.
+
 ## Approved Revision 20: Expected Target Pickup After Screening
 
 Yoni approved the Lorna screening repair. When the expected target explicitly identifies
