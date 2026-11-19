@@ -7662,7 +7662,7 @@ def _sms_is_speed_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(re.search(
         r"\b(?:how|can|could|do|will|would)\b.{0,50}\b(?:you|crisp|your (?:service|team))\b.{0,60}"
-        r"\b(?:speed (?:it|this|that|things|the process) up|speed up|expedite|faster|reduce (?:the )?(?:wait|delays?))\b",
+        r"\b(?:speed (?:it|this|that|things|the process) up|speed up|expedit(?:e|ed|ing)|faster|reduce (?:the )?(?:wait|delays?))\b",
         text,
     ))
 

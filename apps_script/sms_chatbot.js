@@ -2689,7 +2689,7 @@ function isFeeNegotiationSignal_(text) {
 
 function isSpeedQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  return /\b(?:how|can|could|do|will|would)\b.{0,50}\b(?:you|crisp|your (?:service|team))\b.{0,60}\b(?:speed (?:it|this|that|things|the process) up|speed up|expedite|faster|reduce (?:the )?(?:wait|delays?))\b/.test(t);
+  return /\b(?:how|can|could|do|will|would)\b.{0,50}\b(?:you|crisp|your (?:service|team))\b.{0,60}\b(?:speed (?:it|this|that|things|the process) up|speed up|expedit(?:e|ed|ing)|faster|reduce (?:the )?(?:wait|delays?))\b/.test(t);
 }
 
 function buildSpeedQuestionReply_() {
@@ -8058,6 +8058,19 @@ function testSmsIntentContractV3_() {
   record("speed_question_variants", speedVariants.every(function(text) {
     return applyFastRules_(text, baseRow).reply_text === speedExpected;
   }));
+  const expeditedCompound = applyFastRules_(
+    "How much is the fee and would you be able to get things expedited? We don't have offers yet but he's hoping to be able to close by December 31st to use as a tax write off",
+    baseRow
+  );
+  record("expedited_compound_answers_fee_and_speed",
+    expeditedCompound.reply_text.indexOf("$5,000") !== -1 &&
+      expeditedCompound.reply_text.indexOf("The lender still controls review timing.") !== -1 &&
+      expeditedCompound.reason === "Answered all bounded supported questions in one message" &&
+      !expeditedCompound.handoff_needed && !expeditedCompound.block_reply,
+    expeditedCompound.reason);
+  record("expedited_speed_inflection_controls",
+    isSpeedQuestionSignal_("Would you be able to get things expediting?") &&
+      !isSpeedQuestionSignal_("We received an expedited title report."));
   const speedRepeatRow = Object.assign({}, baseRow);
   speedRepeatRow[HEADERS.last_outbound_text] = speedExpected;
   const speedRepeat = applyRepeatGuard_(applyFastRules_(speedText, speedRepeatRow), speedRepeatRow, speedText);

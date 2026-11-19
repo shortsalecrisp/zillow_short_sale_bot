@@ -4174,6 +4174,29 @@ def test_sms_speed_question_answers_delay_mechanism_and_preserves_guards(monkeyp
     assert source["reply_text"] == "I'm sorry, I thought I saw it in the listing but I may have misread it."
 
 
+def test_sms_expedited_compound_fee_question_answers_both_parts(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "How much is the fee and would you be able to get things expedited? "
+        "We don't have offers yet but he's hoping to be able to close by December 31st "
+        "to use as a tax write off"
+    )
+
+    decision = module._sms_build_decision({}, inbound)
+
+    assert "$5,000" in decision["reply_text"]
+    assert "The lender still controls review timing." in decision["reply_text"]
+    assert "Where is this file getting held up?" in decision["reply_text"]
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["reason"] == "Answered a bounded two-question inbound message"
+    assert module._sms_is_speed_question("Would you be able to get things expediting?") is True
+    assert module._sms_is_speed_question("We received an expedited title report.") is False
+
+
 def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
