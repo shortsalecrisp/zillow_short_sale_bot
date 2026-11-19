@@ -856,7 +856,7 @@ for (const sample of [
   { name: "Elena", question: "Is Thirty Nine Valiant Ridge your listing?", answer: "Yeah.",
     needs: "Would help with lender paperwork or calls be useful for ...", reply: undefined },
 ]) {
-  test(`r21 ${sample.name} answered listing check is not a hangup before opening`, async () => {
+  test(`current policy measures ${sample.name}'s answered listing check, not a hangup before opening`, async () => {
     const { VOICE_CONVERSATION_POLICY_VERSION } = await import("../src/lib/elevenLabsConversationPolicy");
     const result = await measurementLog({ metadata: { fullName: `${sample.name} Synthetic`,
       initialOpeningPolicy: "listen_first_listing_agent_v2", declaredConversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION },
@@ -919,10 +919,11 @@ test("screening and voicemail cannot supply live opening delivery or response cr
 });
 
 test("future uniform policy wording recognition does not admit unknown final provider versions", async () => {
+  const { ELEVENLABS_UNIFORM_COMPARISON } = await import("../src/lib/elevenLabsRuntimeExperiment");
   const result = await measurementLog({ metadata: { testMode: false, providerProofCall: false,
     declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20990101-r999" },
     conversation: { agent_id: "agent_unknown", branch_id: "branch_unknown", version_id: "version_unknown",
-      metadata: { start_time_unix_secs: 1794967500, call_duration_secs: 20 }, transcript: [
+      metadata: { start_time_unix_secs: Math.ceil(Date.parse(ELEVENLABS_UNIFORM_COMPARISON.startedAt) / 1000) + 60, call_duration_secs: 20 }, transcript: [
       { role: "user", message: "Hello." },
       { role: "agent", message: "Is 123 Fictional Street your listing?" },
       { role: "user", message: "Yes." },

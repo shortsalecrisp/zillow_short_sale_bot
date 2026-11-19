@@ -1,6 +1,44 @@
 # Uniform Conversion Comparison
 
-Current revision is r21, verified at 2026-11-17T02:03:30.687Z (November 16 at 9:03:30.687 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r21.
+Current revision is r22, independently verified at 2026-11-19T02:16:54.894Z (November 18 at 9:16:54.894 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r22.
+
+## Approved Revision 22: Exact AI Answer And Silent Second-Attempt Recording
+
+Yoni approved all November 18 repairs and the monitor pin update after verification.
+The guarded paired publisher changed exactly four reviewed strings: root policy,
+embedded opening policy/listening suffix and the two existing silent-recording entry
+conditions. The conflicting general AI answer is replaced by the exact approved
+"I'm already an AI assistant with Crisp Short Sales." for AI/robot/automated/robocall
+questions. Answer a genuinely accompanying substantive question; otherwise wait without
+an unsolicited explanation, listing restart or Yoni offer. Existing opt-out precedence stays.
+
+On attempt two, a completed recorded voicemail greeting or terminal screener saying
+the person is unavailable and inviting an additional message uses the existing silent
+exit before speech or voicemail_detection. Active hold/screening, incomplete recordings,
+uncertain origin and later genuine live speech, questions, callbacks, opt-outs or takeover
+retain their guarded paths. First-attempt normal voicemail handling remains unchanged.
+All edge orders, live guard priority, exit node, tools, voices/models, gpt-4.1, turn_v3,
+hold audio, consent, platform/phone/WhatsApp/procedure fields and local windows are unchanged.
+
+- Cohort: `maya_uniform_lead_conversion_20261118_r22`.
+- Boundary after independent final readback: `2026-11-19T02:16:54.894Z`.
+- Policy: `maya-uniform-lead-conversion-20261118-r22`.
+- Flash: `agtvrsn_2301m7rsddpefbztdt2w86wfj32k`, `eleven_flash_v2`, 50%.
+- v4: `agtvrsn_9801m7rsdfvhfszap43vvavg4j0y`, `eleven_v4_turbo`, 50%.
+- Root prompt (6,283 words): `5ba78f2e39ead68579d682e3681d5ab9d2a16727000eff92f8f7c25e30059ffa`.
+- Shared normalized body: `bd4588f41202f0168fdd38007c82ada311db937cbeb007341b881c586f6e14f1`.
+- Workflow: `c450d7e8915cdcd0ad1c10d87c2a1b6ccc9e0c13af3531ab1ca0ade00bc11718`.
+
+Release and independent readback evidence: `voice-ai-voicemail-repair-20261118/paired-r22/`
+and `independent-final-verification.json` under the original task artifact root.
+The reconciled r21 final checkpoint is 56 genuine current-phone calls (Flash31/v4 25),
+including all 32 previously held candidates freshly verified against final receipts and
+current phone/row/attempt, metrics, duplicate and local-window evidence. Two unaccepted
+zero-duration failures and Sandra's corrected old-number call are excluded. Earlier
+cohorts remain separate; these counts are not true-live or conversion counts.
+Shannon row6975 stays R/do-not-call and Deidre row6954 remains exhausted; no redial,
+message, historical-row rewrite or test call was authorized or performed. Configuration
+and synthetic tests do not prove future organic delivery, silence or acoustic behavior.
 
 ## Approved Revision 21: Matched Screening Recovery And Recording Safeguards
 
