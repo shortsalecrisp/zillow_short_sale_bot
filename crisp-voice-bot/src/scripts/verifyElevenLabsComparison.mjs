@@ -26,6 +26,9 @@ const isObject = value => value !== null && typeof value === 'object' && !Array.
 
 export function comparisonPlatformSettings(settings) {
   const result = structuredClone(settings);
+  const reports = isObject(result) && Object.hasOwn(result, 'bi_reports') ? result.bi_reports : undefined;
+  if (isObject(reports) && Object.keys(reports).length === 1 && Object.hasOwn(reports, 'enabled')
+      && reports.enabled === null) delete result.bi_reports;
   const path = ['overrides', 'conversation_config_override', 'agent', 'prompt'];
   let prompt = result;
   for (const key of path) {
@@ -41,6 +44,13 @@ export function comparisonPlatformSettings(settings) {
 
 export function comparisonWorkflow(workflow) {
   const result = structuredClone(workflow);
+  const analysis = isObject(result) && Object.hasOwn(result, 'analysis_settings') ? result.analysis_settings : undefined;
+  if (isObject(analysis) && Object.keys(analysis).length === 3
+      && Object.hasOwn(analysis, 'enabled') && analysis.enabled === true
+      && Object.hasOwn(analysis, 'strict') && analysis.strict === false
+      && Object.hasOwn(analysis, 'ignore') && isObject(analysis.ignore) && Object.keys(analysis.ignore).length === 0) {
+    delete result.analysis_settings;
+  }
   // Reconcile only the provider's numeric GET-only workflow schema marker.
   if (isObject(result) && Object.hasOwn(result, 'version') && result.version === 1) {
     delete result.version;

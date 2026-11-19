@@ -9,6 +9,7 @@ import { applySharedBusinessPrompt, sharedBusinessPromptProtectedHashes } from '
 import { applyNoVoicemailWorkflow, noVoicemailProtectedHashes } from './elevenLabsNoVoicemailWorkflow.mjs';
 import { applyConversationRecovery, recoveryProtectedHashes } from './elevenLabsConversationRecovery.mjs';
 import { applyScreeningRecovery, screeningRecoveryProtectedHashes } from './elevenLabsScreeningRecovery.mjs';
+import { applyAiVoicemailRepair, aiVoicemailProtectedHashes } from './elevenLabsAiVoicemailRepair.mjs';
 export { comparisonBody, digest };
 function contactProtectedHashes(agent) {
   const config = structuredClone(agent.conversation_config);
@@ -76,16 +77,16 @@ export function assertComparison(control, test) {
   }
 }
 
-export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, repairSharedBusinessPrompt = false, repairNoVoicemail = false, repairConversationRecovery = false, repairScreeningRecovery = false, holdAudio,
+export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, repairSharedBusinessPrompt = false, repairNoVoicemail = false, repairConversationRecovery = false, repairScreeningRecovery = false, repairAiVoicemail = false, holdAudio,
   contactToolReplacements, contactToolMapHash, verifyContactTools }, fetcher = fetch) {
   if (!apiKey || !/^agent_[a-z0-9]+$/.test(agentId ?? '') || branches?.length !== 2
     || new Set(branches.map(b => b.id)).size !== 2 || !receiptDir) throw new Error('Two explicit reviewed branches required');
-  if ([repairScreeningRecovery, repairConversationRecovery, repairAcceptedTransfer, repairSharedBusinessPrompt, repairNoVoicemail, Boolean(holdAudio), Boolean(contactToolReplacements)].filter(Boolean).length > 1) throw new Error('One reviewed release profile at a time');
+  if ([repairAiVoicemail, repairScreeningRecovery, repairConversationRecovery, repairAcceptedTransfer, repairSharedBusinessPrompt, repairNoVoicemail, Boolean(holdAudio), Boolean(contactToolReplacements)].filter(Boolean).length > 1) throw new Error('One reviewed release profile at a time');
   const contactRelease = Boolean(contactToolReplacements);
   if (contactRelease && (!/^[a-f0-9]{64}$/.test(contactToolMapHash ?? '') || typeof verifyContactTools !== 'function')) {
     throw new Error('Verified contact-tool map and fresh resource verifier required');
   }
-  const managedRelease = repairScreeningRecovery || repairConversationRecovery || repairAcceptedTransfer || repairSharedBusinessPrompt || repairNoVoicemail || Boolean(holdAudio) || contactRelease;
+  const managedRelease = repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || repairAcceptedTransfer || repairSharedBusinessPrompt || repairNoVoicemail || Boolean(holdAudio) || contactRelease;
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${agentId}`;
   const get = async url => {
     const r = await fetcher(url, { method: 'GET', headers: { 'xi-api-key': apiKey }, signal: AbortSignal.timeout(45000) });
@@ -102,7 +103,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     }
   };
   const prompt = extractPrompt(await readFile(promptPath, 'utf8'));
-  const protectedForRelease = repairScreeningRecovery ? screeningRecoveryProtectedHashes : repairConversationRecovery ? recoveryProtectedHashes : repairNoVoicemail ? noVoicemailProtectedHashes : repairSharedBusinessPrompt ? sharedBusinessPromptProtectedHashes : contactRelease ? contactProtectedHashes : holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
+  const protectedForRelease = repairAiVoicemail ? aiVoicemailProtectedHashes : repairScreeningRecovery ? screeningRecoveryProtectedHashes : repairConversationRecovery ? recoveryProtectedHashes : repairNoVoicemail ? noVoicemailProtectedHashes : repairSharedBusinessPrompt ? sharedBusinessPromptProtectedHashes : contactRelease ? contactProtectedHashes : holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
   const verifyAudioTool = async () => {
     if (!holdAudio || !/^tool_[a-z0-9]+$/.test(holdAudio.id ?? '') || holdAudio.id === AVAILABILITY_TOOL_ID
       || !/^[a-f0-9]{64}$/.test(holdAudio.sourceHash ?? '') || !/^[a-f0-9]{64}$/.test(holdAudio.candidateHash ?? '')) throw new Error('Exact reviewed shared audio-tool clone required');
@@ -126,7 +127,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     before.push(agent);
   }
   const candidates = before.map(agent => {
-    const result = repairScreeningRecovery ? applyScreeningRecovery(agent,prompt) : repairConversationRecovery ? applyConversationRecovery(agent,prompt) : repairNoVoicemail ? applyNoVoicemailWorkflow(agent, prompt) : repairSharedBusinessPrompt ? applySharedBusinessPrompt(agent, prompt) : contactRelease ? replaceContactBindings(agent, contactToolReplacements)
+    const result = repairAiVoicemail ? applyAiVoicemailRepair(agent,prompt) : repairScreeningRecovery ? applyScreeningRecovery(agent,prompt) : repairConversationRecovery ? applyConversationRecovery(agent,prompt) : repairNoVoicemail ? applyNoVoicemailWorkflow(agent, prompt) : repairSharedBusinessPrompt ? applySharedBusinessPrompt(agent, prompt) : contactRelease ? replaceContactBindings(agent, contactToolReplacements)
       : holdAudio ? applyTransferHoldAudio(agent, holdAudio.id) : repairAcceptedTransfer ? applyAcceptedTransferWorkflow(agent) : structuredClone(agent);
     if (managedRelease && !contactRelease && !repairSharedBusinessPrompt && result.conversation_config.agent.prompt.prompt !== prompt) {
       throw new Error('Managed transfer repair must preserve the existing business prompt');
@@ -136,7 +137,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
   });
   assertComparison(...candidates);
   const plan = { agentId, branches, promptHash: sha256(prompt), protected: before.map(protectedForRelease),
-    ...(managedRelease ? { release: repairScreeningRecovery ? 'screening-listener-and-recording-r21' : repairConversationRecovery ? 'confirmed-state-and-missing-handoff-r19' : repairNoVoicemail ? 'recorded-no-voicemail-r17' : repairSharedBusinessPrompt ? 'shared-business-prompt-r14' : contactRelease ? 'recorded-voicemail-contact-guard-r12' : holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
+    ...(managedRelease ? { release: repairAiVoicemail ? 'ai-status-and-second-attempt-recording-r22' : repairScreeningRecovery ? 'screening-listener-and-recording-r21' : repairConversationRecovery ? 'confirmed-state-and-missing-handoff-r19' : repairNoVoicemail ? 'recorded-no-voicemail-r17' : repairSharedBusinessPrompt ? 'shared-business-prompt-r14' : contactRelease ? 'recorded-voicemail-contact-guard-r12' : holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
       ...(holdAudio ? { holdAudio } : {}), ...(contactRelease ? { contactToolMapHash } : {}), beforeBodies: before.map(a => digest(comparisonBody(a))) } : {}),
     sharedHash: digest(comparisonBody(candidates[0])), workflowHash: digest(comparisonBody(candidates[0]).workflow) };
   await mkdir(receiptDir, { recursive: true, mode: 0o700 });
@@ -171,9 +172,9 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
       try {
         const r = await fetcher(`${endpoint}?branch_id=${encodeURIComponent(branches[i].id)}&enable_versioning_if_not_enabled=true`, {
           method: 'PATCH', headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workflow: candidates[i].workflow, ...((repairScreeningRecovery || repairConversationRecovery || holdAudio || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? {
-            conversation_config: { agent: { prompt: { ...((repairScreeningRecovery || repairConversationRecovery || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? { prompt } : {}),
-              ...(!repairScreeningRecovery && !repairConversationRecovery && !repairSharedBusinessPrompt && !repairNoVoicemail ? { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } : {}) } } } } : {}) }), signal: AbortSignal.timeout(60000) });
+          body: JSON.stringify({ workflow: candidates[i].workflow, ...((repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || holdAudio || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? {
+            conversation_config: { agent: { prompt: { ...((repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? { prompt } : {}),
+              ...(!repairAiVoicemail && !repairScreeningRecovery && !repairConversationRecovery && !repairSharedBusinessPrompt && !repairNoVoicemail ? { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } : {}) } } } } : {}) }), signal: AbortSignal.timeout(60000) });
         if (!r.ok) throw new Error(`Provider managed PATCH failed HTTP ${r.status}; read back before retrying`);
         const after = await read(branches[i]);
         if (after.agent_id !== agentId || after.branch_id !== branches[i].id || !after.version_id
@@ -224,6 +225,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     repairNoVoicemail: args.includes('--repair-no-voicemail'),
     repairConversationRecovery: args.includes('--repair-conversation-recovery'),
     repairScreeningRecovery: args.includes('--repair-screening-recovery'),
+    repairAiVoicemail: args.includes('--repair-ai-voicemail'),
     holdAudio: args.includes('--hold-audio-tool-id') ? { id: at('--hold-audio-tool-id'), sourceHash: at('--hold-audio-source-hash'),
       candidateHash: at('--hold-audio-tool-hash') } : undefined })
     .then(receipt => console.log(JSON.stringify(receipt)))

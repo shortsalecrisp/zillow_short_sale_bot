@@ -22,6 +22,40 @@ function newShape(agent) {
 const expected = { ...R8_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
 const allocation = () => ({ meta: { total: 2 }, results: R8_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
 
+test('only the exact direct workflow analysis response default is reconciled', () => {
+  const fresh=fixture();fresh.workflow.analysis_settings={enabled:true,strict:false,ignore:{}};
+  const before=JSON.stringify(fresh);
+  assert.deepEqual(comparisonBody(fresh),comparisonBody(fixture()));
+  assert.equal(JSON.stringify(fresh),before);
+  assert.equal(validateComparison([fresh,fixture(1)],allocation(),expected).ok,true);
+  for(const value of [null,false,[],{}, {enabled:false,strict:false,ignore:{}}, {enabled:true,strict:true,ignore:{}},
+    {enabled:true,strict:false,ignore:[]}, {enabled:true,strict:false,ignore:{configured:true}},
+    {enabled:'true',strict:false,ignore:{}}, {enabled:true,strict:null,ignore:{}},
+    {enabled:true,strict:false,ignore:{},other:null}, {enabled:true,strict:false}]){
+    const a=fixture();a.workflow.analysis_settings=value;
+    assert.throws(()=>validateComparison([a,fixture(1)],allocation(),expected),/configuration digest/);
+  }
+  for(const edit of [a=>{a.workflow.edges[0].analysis_settings={enabled:true,strict:false,ignore:{}};},
+    a=>{a.conversation_config.analysis_settings={enabled:true,strict:false,ignore:{}};},
+    a=>{a.workflow.frames={};},a=>{a.conversation_config.agent.prompt.enable_prompt_caching=true;}]){
+    const a=fixture();edit(a);assert.throws(()=>validateComparison([a,fixture(1)],allocation(),expected),/configuration digest/);
+  }
+});
+
+test('only own root bi_reports with the single null enabled field is reconciled', () => {
+  const base={test:false},fresh={...base,bi_reports:{enabled:null}},before=JSON.stringify(fresh);
+  assert.deepEqual(validator.comparisonPlatformSettings(fresh),base);
+  assert.equal(JSON.stringify(fresh),before);
+  const agents=[fixture(),fixture(1)];agents[0].platform_settings=fresh;
+  assert.equal(validateComparison(agents,allocation(),expected).ok,true);
+  for(const value of [null,false,[],{}, {enabled:false},{enabled:true},{enabled:0},{enabled:'null'},{enabled:null,other:false}]){
+    const a=[fixture(),fixture(1)];a[0].platform_settings.bi_reports=value;
+    assert.throws(()=>validateComparison(a,allocation(),expected),/protected arm mismatch/);
+  }
+  const nested={test:false,nested:{bi_reports:{enabled:null}}};
+  assert.deepEqual(validator.comparisonPlatformSettings(nested),nested);
+});
+
 test('only an own null root conversation avatar is a neutral GET default', () => {
   const fresh = fixture(); fresh.conversation_config.avatar = null;
   const before = JSON.stringify(fresh);

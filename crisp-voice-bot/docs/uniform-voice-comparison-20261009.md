@@ -61,6 +61,31 @@ native 50/50 allocation, prompts, workflows, tools, audio, safeguards, local win
 monitor schedule and notification settings are unchanged. Read-only receipt replay is
 not a new call, acoustic proof, callback completion or transfer evidence.
 
+## Approved Validator-Only Response Defaults, November 18
+
+The exact r21 versions gained only two new neutral response shapes relative to their
+pinned hashes. Removing these exact shapes on offline copies restored the original
+r21 shared/workflow hashes and original protected-platform hash on both arms:
+
+- An own direct `workflow.analysis_settings` non-array object with exactly the own
+  keys `enabled=true`, `strict=false` and `ignore={}` (an empty non-array object).
+- An own root `platform_settings.bi_reports` non-array object with exactly the own
+  key `enabled=null`.
+
+Yoni approved repairing the readback failure. Only these exact shapes are removed by
+the GET-only normalizers. Absent fields stay absent; additional keys, nonempty ignore
+objects, arrays, configured values, wrong types and nested/unrelated fields remain
+visible and fail. Root prompt caching, node parent-frame/interruptions fields and
+workflow frames were already present in the pinned r21 hashes and are NOT normalized.
+The canonical verifier still performs exactly three GETs plus the separate shared-audio
+GET. No provider setting, actual LLM behavior or r21 boundary changes with reconciliation.
+
+The separately approved prospective AI-status and attempt-two recording repair uses a
+guarded four-leaf paired release: root policy, embedded opening policy/listening suffix,
+and both existing silent-recording entry conditions. The live contact/ending guards,
+all edge orders, silent exit node, tools, voice/model/audio and protected settings stay
+unchanged. A new cohort is declared only after both final provider readbacks.
+
 ## Approved Revision 20: Expected Target Pickup After Screening
 
 Yoni approved the Lorna screening repair. When the expected target explicitly identifies

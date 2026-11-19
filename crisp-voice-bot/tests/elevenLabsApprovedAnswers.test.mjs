@@ -16,7 +16,7 @@ const postIntro = prompt.split('# Post-intro conversation\n')[1].split('\n# Answ
 test('all meaningful approved identity, purpose and property answers survive consolidation', () => {
   const expected = [
     "I'm {{assistantName}}, an AI assistant with Crisp Short Sales.",
-    "Yes, I'm an AI assistant with Crisp Short Sales.",
+    "I'm already an AI assistant with Crisp Short Sales.",
     "I'm with Crisp Short Sales. I work with Yoni Kutler, our short sale specialist.",
     "We help prepare the short-sale paperwork and follow up with the lender.",
     "No, we're a separate short-sale processing service.",
@@ -127,9 +127,11 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(prompt, /No declines only that offer; follow the stated email, later-callback or other preference/);
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
 });
-test('AI-voice switching question receives one answer without restarting the pitch', () => {
-  assert.match(prompt, /If the caller asks whether you want to switch to AI voice: "I'm already an AI assistant with Crisp Short Sales\." Then wait\./);
-  assert.match(prompt, /Do not restart the listing check, repeat the service explanation, or offer Yoni unless the caller makes a new, clear request\./);
+test('all AI-status questions receive the exact answer without an unsolicited explanation', () => {
+  assert.match(prompt, /AI\/robot\/automated\/robocall questions, including "Is this a robocall\?", "Are you AI\?" or switching to AI voice: "I'm already an AI assistant with Crisp Short Sales\."/);
+  assert.match(prompt, /Answer an accompanying substantive question; otherwise wait/);
+  assert.match(prompt, /Do not add a service explanation, listing check or Yoni offer without a new clear request/);
+  assert.doesNotMatch(prompt, /Are you AI: "Yes,/);
 });
 test('background noise never causes a location instruction', () => {
   assert.match(repair, /Never tell callers to move because of background noise/);
@@ -150,6 +152,6 @@ test('attempt-one voicemail wording is exactly preserved and not reused on attem
   const expected = "Hi, this is {{assistantName}} with Crisp Short Sales calling about the short sale listing at {{streetAddress}}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.";
   const lines = prompt.split('\n').filter(line => line.startsWith('"Hi, this is {{assistantName}} with Crisp Short Sales calling about'));
   assert.deepEqual(lines, ['"' + expected + '"']);
-  assert.match(prompt, /Attempt 2: leave no second voicemail/);
+  assert.match(prompt, /Attempt 2: never speak a second message/);
   assert.match(prompt, /Wrong-person voicemail protection applies only to a recording, not a live admin/);
 });
