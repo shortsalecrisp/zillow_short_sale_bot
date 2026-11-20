@@ -541,11 +541,12 @@ logging.info(
     bool(_sms_api_key),
 )
 SMS_TEMPLATE      = (
-    "Hey {first}, this is Yoni Kutler with Crisp Short Sales. I saw {address} "
-    "listed as a short sale. I can take the lender paperwork, calls, and "
-    "follow-up off your plate. There's no service fee to you or the seller; "
-    "my fee is buyer-paid at closing. Are you handling the lender side "
-    "yourself, or do you already have help?"
+    "Hi {first}, this is Yoni Kutler with Crisp Short Sales. I specialize in helping agents and homeowners "
+    "with the short sale process and can handle the entire process for you like all the paperwork, phone calls, "
+    "and coordination that will be required to obtain lender approval. There is no cost to the agent or homeowner "
+    "for this service - so its completely free to you and your client and i have almost 20 years of experience "
+    "doing nothing but short sales every single day - so im confident i can help you if youre interested. "
+    "Do you have some time for a quick call to go over your listing and what we do?"
 )
 SMS_FU_TEMPLATE   = (
     "Hey, just wanted to follow up on my message from earlier. "
@@ -12812,6 +12813,7 @@ def _enqueue_tasker_sms_outbox(
     mark_codex_verified: bool = False,
     request_prefix: str = "scheduler",
     followup_context: Optional[Dict[str, Any]] = None,
+    listing_address: str = "",
 ) -> Optional[Dict[str, Any]]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         return None
@@ -12837,6 +12839,7 @@ def _enqueue_tasker_sms_outbox(
     }
     if action == "enqueue_initial_sms":
         body["mark_codex_verified"] = mark_codex_verified
+        body["listing_address"] = listing_address
     elif followup_context:
         for key in ("followup_key", "initial_sent_at", "video_variant", "video_job_id", "first_name"):
             body[key] = followup_context[key]
@@ -12904,6 +12907,7 @@ def send_sms(
             message=msg_txt,
             stable_id=stable_id,
             mark_codex_verified=False,
+            listing_address=address,
         )
         if queued is None:
             LOG.error("TASKER_INITIAL_OUTBOX_NOT_CONFIGURED row=%s phone=%s", row_idx, digits)

@@ -75,7 +75,7 @@ def test_scope_answer_at_reply_cap_goes_to_owner(chatbot):
 def test_buyer_question_and_fee_both_answered(chatbot):
     result = chatbot.receive('Do you have buyers, and what is your fee?')
     assert "don't bring the buyer" in result['reply_text']
-    assert '$5,000' in result['reply_text']
+    assert '$5000' in result['reply_text']
 
 
 def test_unsafe_output_with_handoff_cannot_record_a_fake_appointment(chatbot):

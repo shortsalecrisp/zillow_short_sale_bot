@@ -4060,6 +4060,7 @@ def _enqueue_initial_sms_via_tasker_outbox(
     mark_codex_verified: bool,
     stable_id: str = "",
     force_resend: bool = False,
+    listing_address: str = "",
 ) -> Dict[str, Any]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
@@ -4081,6 +4082,7 @@ def _enqueue_initial_sms_via_tasker_outbox(
                 "stable_id": stable_id,
                 "zpid": stable_id,
                 "mark_codex_verified": mark_codex_verified,
+                "listing_address": listing_address,
             },
             timeout=20,
         )
@@ -4491,6 +4493,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         mark_codex_verified=mark_codex_verified,
         stable_id=stable_id,
         force_resend=force_resend,
+        listing_address=_row_value(row, 4),
     )
     logger.info(
         "INTERNAL_INITIAL_SMS_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s codex_verified=%s",
@@ -4776,8 +4779,10 @@ SMS_SELF_HANDLING_REPLY = (
     "pays my fee at closing. Would a brief call to see if that helps on this file be worthwhile?"
 )
 SMS_SPECIFIC_FEE_REPLY = (
-    "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you "
-    "or the seller, and I don't take anything from your commission."
+    "Like i said, no cost at all to you or your client. I charge a flat fee of $5000 to the buyer, paid only "
+    "if/when the deal closes. The most important thing is to disclose this cost to them in the listing - "
+    "and then they can account for it in their offer price. Buyers are willing to pay for the service if "
+    "they know its no extra money out of pocket and will help ensure approval."
 )
 SMS_BUYER_COST_CONCERN_REPLY = (
     "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
@@ -6256,7 +6261,7 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "A future-only promise to reconnect after securing a buyer is warm future interest, not an existing-client takeover. "
         "If answering a new substantive question would repeat the prior answer, hand it off instead of suppressing the question. "
         "Do not treat a different fee or buyer-cost question as a repetition of the fee amount. "
-        f"For an explicit amount question, answer: {SMS_SPECIFIC_FEE_REPLY} "
+        f"For the first fee, cost or payment question, answer: {SMS_SPECIFIC_FEE_REPLY} "
         f"For experience, answer: {SMS_EXPERIENCE_REPLY} "
         "Never invent a closed count, success rate, guarantee, buyer acceptance, or owner availability. "
         "A negated refusal such as 'not saying I am not interested' is not a rejection. "
@@ -7569,6 +7574,8 @@ def _sms_is_initial_fee_reply(value: Any) -> bool:
 
 def _sms_is_specific_fee_reply(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    if _sms_normalize_whitespace(SMS_SPECIFIC_FEE_REPLY).lower() in text:
+        return True
     # The initial introduction may contain a 5000 street/unit number, not a fee.
     if "this is yoni kutler with crisp short sales" in text and "are you handling" in text:
         return False
@@ -7602,12 +7609,13 @@ def _sms_fee_decision(row_obj: Dict[str, str], inbound_text: str = "") -> Dict[s
             bypass_reply_cap=initial_delivered and not specific_delivered,
             reason="Answered the explicit amount question with the $5,000 buyer-paid fee",
         )
+    first_fee_answer = not specific_delivered and not initial_delivered
     return _sms_decision(
-        reply_text=(
+        reply_text=SMS_SPECIFIC_FEE_REPLY if first_fee_answer else (
             "There's no cost to you or the seller, and I don't take anything from your commission. "
             "I charge a flat fee to the buyer at closing, only if the deal closes."
         ),
-        response_id="fee_initial",
+        response_id="fee_specific" if first_fee_answer else "fee_initial",
         lead_status="Y",
         reason="Explained who pays without treating a different payment question as a repeat",
     )

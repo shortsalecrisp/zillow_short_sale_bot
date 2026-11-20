@@ -214,7 +214,7 @@ test('keep-you-posted courtesy after a coverage closeout stays silent', () => {
 
   const question = h.incoming('What is your fee?');
   assert.equal(question.should_reply, true);
-  assert.match(question.reply_text, /\$5,000/);
+  assert.match(question.reply_text, /\$5,?000/);
 });
 
 test('passive future contact retention does not suppress questions or open conversations', () => {
@@ -227,7 +227,7 @@ test('passive future contact retention does not suppress questions or open conve
   });
   const question = closed.incoming("I'll save your contact for future listings. What is your fee?");
   assert.equal(question.should_reply, true);
-  assert.match(question.reply_text, /\$5,000/);
+  assert.match(question.reply_text, /\$5,?000/);
 
   const open = smsHarness();
   assert.equal(open.evaluate(
@@ -246,7 +246,7 @@ test('a substantive question still reopens after a completed coverage closeout',
   });
   const result = h.incoming('What is your fee?');
   assert.equal(result.should_reply, true);
-  assert.match(result.reply_text, /\$5,000/);
+  assert.match(result.reply_text, /\$5,?000/);
 });
 
 test('historical experience does not close an undecided current file', () => {
@@ -272,23 +272,22 @@ for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', "W
   test(`amount question answered directly: ${text}`, () => {
     const {r} = answer(text);
     assert.equal(r.should_reply, true);
-    assert.match(r.reply_text, /\$5,000/);
-    assert.match(r.reply_text, /only if the deal closes/);
+    assert.match(r.reply_text, /\$5,?000/);
+    assert.match(r.reply_text, /paid only if\/when the deal closes/);
     assert.equal(r.handoff_needed, false);
   });
 }
 
 test('compound buyer-paid fee and timing question answers amount, duration invariance, and timing', () => {
   const {r} = answer('What is your flat buyer-paid fee, and is that the total fee regardless of how long the short-sale negotiation takes?');
-  assert.match(r.reply_text, /\$5,000/);
+  assert.match(r.reply_text, /\$5,?000/);
   assert.match(r.reply_text, /does not increase/);
   assert.match(r.reply_text, /60-90 days/);
 });
 
 test('payer, amount, and buyer concern are distinct questions, not a loop', () => {
   const h = smsHarness();
-  assert.doesNotMatch(h.incoming('How do you get paid?').reply_text, /5,000/);
-  assert.match(h.incoming('How much is the fee?').reply_text, /5,000/);
+  assert.match(h.incoming('How do you get paid?').reply_text, /5,?000/);
   const r = h.incoming("Won't the buyer lower their offer because of that cost?");
   assert.equal(r.should_reply, true);
   assert.match(r.reply_text, /buyer-paid fee covers Crisp's short-sale processing/);
@@ -297,7 +296,7 @@ test('payer, amount, and buyer concern are distinct questions, not a loop', () =
 
 test('pending-only payer explanation does not advance fee history', () => {
   const {r} = answer('How do you get paid?', {}, {pendingFeeStage: 'initial_pending'});
-  assert.doesNotMatch(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
 });
 
 for (const text of ["I'm confused about how the buyer pays you", "What if the buyer won't pay the fee?", 'Will the buyer lower their offer because of the cost?']) {
@@ -354,7 +353,7 @@ test('supported multi-question answer covers location, fee, scope, and tenure', 
   assert.equal(r.should_reply, true);
   assert.match(r.reply_text, /Atlanta/);
   assert.match(r.reply_text, /paperwork/);
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.match(r.reply_text, /15 years/);
 });
 
@@ -458,7 +457,7 @@ test('verified tenure + unknown recent count gets answer and named handoff', () 
   const {h, r} = answer("What's your fee and how many short sales have you closed in the last six months?");
   assert.equal(r.should_reply, true);
   assert.match(r.reply_text, /15 years/);
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.match(r.reply_text, /(?:don't have|verify|confirm|check).{0,60}(?:count|number|figure)/i);
   assert.equal(r.handoff_needed, true);
   assert.equal(h.effects[0].reason, 'STATS QUESTION');
@@ -486,7 +485,7 @@ test('configured verified completed count answers directly without takeover', ()
 test('fee plus requested call may answer once, but never reopens old handoff', () => {
   const {h, r} = answer('What is your fee? Please call me tomorrow at 3 pm ET.');
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.equal(r.handoff_needed, true);
   assert.match(h.state.callback_time, /Tomorrow.*3\s*pm.*ET/i);
   assert.equal(h.incoming('And how do you get paid?').should_reply, false);
@@ -497,7 +496,7 @@ test('fee plus requested call may answer once, but never reopens old handoff', (
 test('fee plus present help preserves an owner alert after the answer', () => {
   const {h, r} = answer('I need help. What is your fee?');
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.equal(r.handoff_needed, true);
   assert.match(h.effects[0].reason, /FEE AND HELP/);
   assert.equal(h.state.human_override, 'TRUE');
@@ -672,7 +671,7 @@ test('amount plus buyer concern answers both questions', () => {
   const {r} = answer('What is your fee, and what if the buyer cannot afford it?');
   assert.equal(r.should_reply, true);
   assert.equal(r.handoff_needed, false);
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.match(r.reply_text, /buyer-paid fee covers Crisp's short-sale processing/);
 });
 
@@ -683,7 +682,7 @@ test('existing first-fee-after-closeout cap exception also covers a compound que
   });
   assert.equal(r.should_reply, true);
   assert.equal(r.lead_status, 'O');
-  assert.match(r.reply_text, /5,000/);
+  assert.match(r.reply_text, /5,?000/);
   assert.match(r.reply_text, /Atlanta/);
   assert.match(r.reply_text, /paperwork/);
 });

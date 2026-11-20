@@ -41,7 +41,7 @@ def test_not_short_sale_and_self_handling_do_not_use_h(monkeypatch):
 def test_existing_provider_does_not_replace_fee_answer(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     decision = module._sms_fast_decision({}, 'I already have an attorney, but what is your fee?')
-    assert '$5,000' in decision['reply_text']
+    assert '$5000' in decision['reply_text']
     assert decision['reply_text'] != module.SMS_ALREADY_HAS_HELP_REPLY
 
 

@@ -16,7 +16,7 @@ const inbound = [
 ].join(' ');
 const decision = context.applyFastRules_(inbound, {});
 
-assert.match(decision.reply_text, /\$5,000/);
+assert.match(decision.reply_text, /\$5,?000/);
 assert.match(decision.reply_text, /The lender still controls review timing\./);
 assert.match(decision.reply_text, /Where is this file getting held up\?/);
 assert.equal(decision.lead_status, 'Y');

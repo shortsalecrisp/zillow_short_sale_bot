@@ -89,7 +89,7 @@ test('a real phone call after clarification uses the existing callback flow', ()
 test('buyer question still answers an explicit fee question in the same message', () => {
   const r = smsHarness().incoming('Do you have buyers, and what is your fee?');
   assert.match(r.reply_text,/don't bring the buyer/);
-  assert.match(r.reply_text,/\$5,000/);
+  assert.match(r.reply_text,/\$5,?000/);
 });
 test('unsafe output with a handoff cannot record a fake appointment', () => {
   const h = smsHarness();

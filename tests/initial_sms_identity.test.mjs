@@ -12,6 +12,7 @@ const stableId = "10/15/2026 8:01:04";
 const phone = "7022185200";
 const request = (changes = {}) => ({
   crm_row: 2, phone, stable_id: stableId, message: initialMessage(),
+  listing_address: '4504 Exposition Ave',
   message_id: "initial-2-b8d95a8044052af0", request_id: "render-initial-2-b8d95a8044052af0",
   ...changes,
 });
@@ -113,6 +114,7 @@ test("freeze only the volatile identity as a literal under lock before initial e
     crm_row: 2,
     stable_id: stableId,
     mark_codex_verified: true,
+    listing_address: '4504 Exposition Ave',
     recipient_time_zone: "America/Los_Angeles",
   });
 });
@@ -136,11 +138,17 @@ test("matching queued or sent replay does not mutate AB or append another initia
   }
 });
 
-test("volatile identity requires the complete approved opener for current first name and street", () => {
-  for (const message of [initialMessage("Anthony"), initialMessage("Sherri", "15 Washington Way"), initialMessage() + " Extra", "Hey Sherri, 4504 Exposition Ave", initialMessage().replace("buyer-paid", "seller-paid")]) {
+test("volatile identity requires exact new opener and internally bound current property", () => {
+  for (const message of [initialMessage("Anthony"), initialMessage() + " Extra", "Hey Sherri, 4504 Exposition Ave", initialMessage().replace("completely free", "not free")]) {
     deniedWithoutWrites(harness(), request({ message }));
   }
+  for (const listing_address of [undefined, '', '15 Washington Way']) deniedWithoutWrites(harness(), request({ listing_address }));
   deniedWithoutWrites(harness(), request({ phone: "7023261282" }));
+});
+
+test('legacy approved opener remains valid without the new internal property field', () => {
+  const message = "Hey Sherri, this is Yoni Kutler with Crisp Short Sales. I saw 4504 Exposition Ave listed as a short sale. I can take the lender paperwork, calls, and follow-up off your plate. There's no service fee to you or the seller; my fee is buyer-paid at closing. Are you handling the lender side yourself, or do you already have help?";
+  assert.equal(harness().enqueue(request({message, listing_address: undefined})).queued, true);
 });
 
 test("unknown, cross-row and blank-identity formulas are not silently frozen", () => {
