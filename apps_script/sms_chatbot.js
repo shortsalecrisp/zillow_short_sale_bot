@@ -6702,8 +6702,11 @@ function buildIdentityResendReply_(rowObj) {
     return "Sorry, I had messaged you earlier: " + originalText;
   }
   const firstName = getCanonicalFirstName_(rowObj) || "there";
+  const street = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.listing_address] || "").split(",")[0]);
   return "Sorry, I had messaged you earlier: Hi " + firstName
-    + ", this is Yoni Kutler with Crisp Short Sales. I specialize in helping agents and homeowners "
+    + ", this is Yoni Kutler with Crisp Short Sales"
+    + (street ? " reaching out about the listing on " + street : "")
+    + ". I specialize in helping agents and homeowners "
     + "with the short sale process and can handle the entire process for you like all the paperwork, phone calls, "
     + "and coordination that will be required to obtain lender approval. There is no cost to the agent or homeowner "
     + "for this service - so its completely free to you and your client and i have almost 20 years of experience "

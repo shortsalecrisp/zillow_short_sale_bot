@@ -151,6 +151,12 @@ test('legacy approved opener remains valid without the new internal property fie
   assert.equal(harness().enqueue(request({message, listing_address: undefined})).queued, true);
 });
 
+test('earlier approved address-free copy remains valid with its frozen internal property', () => {
+  const message = initialMessage().replace(' reaching out about the listing on 4504 Exposition Ave', '');
+  assert.equal(harness().enqueue(request({message})).queued, true);
+  deniedWithoutWrites(harness(), request({message, listing_address: 'Wrong Property'}));
+});
+
 test("unknown, cross-row and blank-identity formulas are not silently frozen", () => {
   for (const formula of ['=IF(D3<>"", NOW(), "")', "=TODAY()", '=IF(D2<>"", NOW()+1, "")', '=IF(D2<>"", RAND(), "")', '=IF(D2<>" ", NOW(), " ")']) deniedWithoutWrites(harness({ formula }));
   for (const id of ["", "=NOW()", "@other", "first\nsecond", "arbitrary-id"]) deniedWithoutWrites(harness(), request({ stable_id: id }));

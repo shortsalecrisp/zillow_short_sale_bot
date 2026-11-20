@@ -12,11 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 APPROVED = json.loads((ROOT / 'tests/fixtures/sms_approved_opener.json').read_text())
 
 
-def test_initial_is_exact_and_only_first_name_is_interpolated():
+def test_initial_is_exact_and_interpolates_first_name_and_street():
     template = _source_sms_template('SMS_TEMPLATE')
     assert template == APPROVED['template']
     for first in ('Alex', 'Anne-Marie', "O'Neil"):
-        assert template.format(first=first, address='5000 Example Lane') == APPROVED['template'].replace('{first}', first)
+        assert template.format(first=first, address='5000 Example Lane') == APPROVED['template'].replace('{first}', first).replace('{address}', '5000 Example Lane')
     assert set(template) <= {chr(n) for n in range(128)}
 
 
@@ -45,7 +45,7 @@ def test_initial_property_binding_uses_fresh_sheet_not_payload(monkeypatch):
     assert result.status_code == 200
     assert captured[0]['listing_address'] == sheet.rows[12][4]
     assert captured[0]['listing_address'] != 'Wrong injected address'
-    assert captured[0]['message'] == APPROVED['template'].format(first='Alex')
+    assert captured[0]['message'] == APPROVED['template'].format(first='Alex', address='Wrong injected address')
 
 
 @pytest.mark.parametrize('question', ['What is your fee?', 'How much does it cost?', 'Who pays you?', 'How do you get paid?', 'Does the seller pay anything?'])
