@@ -2417,6 +2417,7 @@ function isInitialFeeReplyText_(text) {
 
 function isSpecificFeeReplyText_(text) {
   const t = normalizeLanguageSignalText_(text);
+  if (t.indexOf(normalizeLanguageSignalText_(buildSpecificFeeReply_())) !== -1) return true;
   // Listing numbers in the opener are not a quoted service fee.
   if (/\bthis is yoni kutler with crisp short sales\b/.test(t) && /\bare you handling\b/.test(t)) return false;
   const compact = t.replace(/[^a-z0-9]/g, "");
@@ -2435,7 +2436,7 @@ function isExplicitFeeAmountQuestion_(text) {
 }
 
 function buildSpecificFeeReply_() {
-  return "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you or the seller, and I don't take anything from your commission.";
+  return "Like i said, no cost at all to you or your client. I charge a flat fee of $5000 to the buyer, paid only if/when the deal closes. The most important thing is to disclose this cost to them in the listing - and then they can account for it in their offer price. Buyers are willing to pay for the service if they know its no extra money out of pocket and will help ensure approval.";
 }
 
 function buildSelfHandlingValueReply_() {
@@ -2607,7 +2608,8 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound, inboundText) {
 
   return {
     matched: true,
-    reply_text: "There's no cost to you or the seller, and I don't take anything from your commission. I charge a flat fee to the buyer at closing, only if the deal closes.",
+    reply_text: !hasPriorSpecificFeeReply && !hasPriorInitialFeeReply ? buildSpecificFeeReply_() :
+      "There's no cost to you or the seller, and I don't take anything from your commission. I charge a flat fee to the buyer at closing, only if the deal closes.",
     lead_status: "Y",
     conversation_done: false,
     handoff_needed: false,
@@ -6618,7 +6620,7 @@ IMPORTANT BEHAVIOR:
 - In that situation, set handoff_needed = true, block_reply = true, and let ${yourName} respond manually
 - Email requests are handled by the deterministic approval workflow. Never claim an email was sent, promise immediate delivery, or infer call consent from "email me before I decide about a call".
 - If they ask for information and no email is available, say: "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
-- For a general "how do you get paid" question, explain that there is no service fee to the agent or seller and the buyer pays a flat fee at closing only if the deal closes.
+- For the first fee, cost or payment question, use exactly: "${buildSpecificFeeReply_()}"
 - If they ask what it costs, how much, or what my fee is, answer $5,000 directly even the first time: "${buildSpecificFeeReply_()}"
 - If they negotiate my fee or request a discount, hand off. A different question about buyer costs, disclosure, or who brings the buyer is not automatically a loop or rejection.
 - For concerns about the buyer lowering an offer to account for the fee, say: "${buildBuyerCostConcernReply_()}" Never promise buyer acceptance or say it is never an issue.
@@ -6700,17 +6702,13 @@ function buildIdentityResendReply_(rowObj) {
     return "Sorry, I had messaged you earlier: " + originalText;
   }
   const firstName = getCanonicalFirstName_(rowObj) || "there";
-  const listingAddress = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.listing_address] || ""));
-  const listingReference = listingAddress
-    ? " I saw " + listingAddress + " listed as a short sale."
-    : "";
-
-  return "Sorry, I had messaged you earlier: Hey " + firstName
-    + ", this is Yoni Kutler with Crisp Short Sales."
-    + listingReference
-    + " I can take the lender paperwork, calls, and follow-up off your plate."
-    + " There's no service fee to you or the seller; my fee is buyer-paid at closing."
-    + " Are you handling the lender side yourself, or do you already have help?";
+  return "Sorry, I had messaged you earlier: Hi " + firstName
+    + ", this is Yoni Kutler with Crisp Short Sales. I specialize in helping agents and homeowners "
+    + "with the short sale process and can handle the entire process for you like all the paperwork, phone calls, "
+    + "and coordination that will be required to obtain lender approval. There is no cost to the agent or homeowner "
+    + "for this service - so its completely free to you and your client and i have almost 20 years of experience "
+    + "doing nothing but short sales every single day - so im confident i can help you if youre interested. "
+    + "Do you have some time for a quick call to go over your listing and what we do?";
 }
 
 function sanitizeReplySelfIntro_(replyText) {

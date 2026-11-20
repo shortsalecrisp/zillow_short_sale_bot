@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from test_internal_sms_endpoint import APPROVED_OPENER, CHATBOT_HEADERS, FakeSendResult, _import_webhook_server
+from test_internal_sms_endpoint import APPROVED_OPENER, APPROVED_SPECIFIC_FEE_REPLY, CHATBOT_HEADERS, FakeSendResult, _import_webhook_server
 
 
 SELF_REPLY = (
@@ -13,10 +13,7 @@ SELF_REPLY = (
     "and follow-up off your plate. There's no fee to you or the seller and no commission split; the buyer pays "
     "my fee at closing. Would a brief call to see if that helps on this file be worthwhile?"
 )
-FEE_REPLY = (
-    "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you or "
-    "the seller, and I don't take anything from your commission."
-)
+FEE_REPLY = APPROVED_SPECIFIC_FEE_REPLY
 BUYER_REPLY = (
     "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
     "to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?"
@@ -215,15 +212,16 @@ def test_amount_first_is_explicit_without_prior_fee_delivery(chatbot, message):
 
 def test_general_payer_then_amount_requires_delivery_evidence(chatbot):
     first = chatbot.receive("How do you get paid?")
-    assert first["response_id"] == "fee_initial"
-    assert "$5,000" not in first["reply_text"]
+    assert first["response_id"] == "fee_specific"
+    assert first["reply_text"] == FEE_REPLY
     assert chatbot.row()["auto_reply_count"] == "0"
-    assert chatbot.module._sms_has_delivered_response(chatbot.row(), "fee_initial") is False
+    assert chatbot.module._sms_has_delivered_response(chatbot.row(), "fee_specific") is False
     chatbot.deliver(first["reply_text"])
-    assert chatbot.history()[-1]["response_id"] == "fee_initial"
+    assert chatbot.history()[-1]["response_id"] == "fee_specific"
     assert chatbot.row()["auto_reply_count"] == "1"
     second = chatbot.receive("What is the dollar amount?")
-    assert second["reply_text"] == FEE_REPLY
+    assert second["should_reply"] is False
+    assert second["handoff_type"] == "FEE QUESTION FOLLOW-UP"
 
 
 def test_queued_general_fee_is_not_cap_bypass_evidence(chatbot):
@@ -237,10 +235,11 @@ def test_queued_general_fee_is_not_cap_bypass_evidence(chatbot):
 def test_general_fee_stage_advances_only_after_delivery(chatbot):
     first = chatbot.receive("How do you get paid?")
     pending = chatbot.receive("Who pays you?")
-    assert "$5,000" not in pending["reply_text"]
+    assert pending["reply_text"] == FEE_REPLY
     chatbot.deliver(first["reply_text"])
     delivered = chatbot.receive("How are you compensated?")
-    assert delivered["reply_text"] == FEE_REPLY
+    assert delivered["response_id"] == "fee_initial"
+    assert "buyer at closing" in delivered["reply_text"]
 
 
 def test_delivered_specific_fee_id_not_copy_controls_repeat(chatbot):
@@ -322,7 +321,7 @@ def test_failed_provider_multiquestion_keeps_new_copy_and_known_answers(chatbot)
         "Are you local? I used a processor last year who failed me. Can I check out your company? "
         "How do you get paid? This is in Equator."
     )
-    for material in ("Atlanta", "crispshortsales.com", "buyer at closing", "Equator", FAILED_PROVIDER_REPLY):
+    for material in ("Atlanta", "crispshortsales.com", FEE_REPLY, "Equator", FAILED_PROVIDER_REPLY):
         assert material in result["reply_text"]
     assert result["handoff_needed"] is False
 

@@ -36,10 +36,9 @@ def test_final_opener_is_exact_and_followup_restores_previous_wording():
     )
 
 
-APPROVED_SPECIFIC_FEE_REPLY = (
-    "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you "
-    "or the seller, and I don't take anything from your commission."
-)
+APPROVED_SPECIFIC_FEE_REPLY = json.loads(
+    (ROOT / "tests/fixtures/sms_approved_opener.json").read_text()
+)["first_fee_reply"]
 GENERAL_FEE_REPLY = (
     "There's no cost to you or the seller, and I don't take anything from your commission. "
     "I charge a flat fee to the buyer at closing, only if the deal closes."
@@ -359,7 +358,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
 
     sys.modules.pop("webhook_server", None)
     module = importlib.import_module("webhook_server")
-    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified, stable_id="", force_resend=False):
+    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified, stable_id="", force_resend=False, listing_address=""):
         fake_sender.force_resends.append(force_resend)
         call = {
             "to": phone,
@@ -2999,7 +2998,7 @@ def test_sms_ramona_equator_location_and_fee_questions_receive_one_complete_answ
     decision = module._sms_fast_decision({}, inbound)
 
     assert decision["reply_text"] == " ".join([
-        GENERAL_FEE_REPLY,
+        APPROVED_SPECIFIC_FEE_REPLY,
         "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
         "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
         APPROVED_FAILED_PROVIDER_REPLY,
@@ -3007,7 +3006,7 @@ def test_sms_ramona_equator_location_and_fee_questions_receive_one_complete_answ
     ])
     assert "based in Atlanta and work nationwide" in decision["reply_text"]
     assert "familiar with Equator" in decision["reply_text"]
-    assert "flat fee to the buyer at closing" in decision["reply_text"]
+    assert APPROVED_SPECIFIC_FEE_REPLY in decision["reply_text"]
     assert "www.crispshortsales.com" in decision["reply_text"]
     assert decision["lead_status"] == "Y"
     assert decision["handoff_needed"] is False
@@ -3172,7 +3171,7 @@ def test_sms_karla_future_day_and_lisa_compound_fee_regressions(monkeypatch):
         {},
         "What is your flat buyer-paid fee, and is that the total fee regardless of how long the short-sale negotiation takes?",
     )
-    assert "$5,000" in fee["reply_text"]
+    assert APPROVED_SPECIFIC_FEE_REPLY in fee["reply_text"]
     assert "does not increase" in fee["reply_text"]
     assert "60-90 days" in fee["reply_text"]
 
@@ -3924,9 +3923,9 @@ def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followu
 
     pending_only = {"history_json": json.dumps([{"role": "agent", "text": "What do you charge?"}])}
     pending_question = module._sms_fast_decision(pending_only, "Who pays you?")
-    assert pending_question["reply_text"] == GENERAL_FEE_REPLY
+    assert pending_question["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
     assert pending_question["handoff_needed"] is False
-    assert pending_question["response_id"] == "fee_initial"
+    assert pending_question["response_id"] == "fee_specific"
 
 
 def test_sms_exact_fee_after_reply_cap_alerts_owner_without_bot_reply(monkeypatch):
@@ -4186,7 +4185,7 @@ def test_sms_expedited_compound_fee_question_answers_both_parts(monkeypatch):
 
     decision = module._sms_build_decision({}, inbound)
 
-    assert "$5,000" in decision["reply_text"]
+    assert APPROVED_SPECIFIC_FEE_REPLY in decision["reply_text"]
     assert "The lender still controls review timing." in decision["reply_text"]
     assert "Where is this file getting held up?" in decision["reply_text"]
     assert decision["lead_status"] == "Y"

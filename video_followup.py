@@ -561,8 +561,8 @@ class Store:
                      and old["first_name"] == context["first_name"] and valid_name(context["first_name"])
                      and self.publication_ready(old))
             variant = "video" if ready and origin else "text"
-            payload = ("Hey just wanted you to see im a real person who can really help you with this short sale.  "
-                       "Please reach out if interested!\n"
+            payload = ("Hi, just following up again and i wanted you to see i am a real person and i REALLY can help "
+                       "you with your short sale. Let me know if you got a second to chat.\n"
                        f"{origin}/v/{old['id']}") if variant == "video" else text
             frozen[0] = True
             return {**old, "status": "frozen_" + variant, "variant": variant, "message": payload,

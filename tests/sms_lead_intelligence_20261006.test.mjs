@@ -53,7 +53,7 @@ test('referral company-info request gets canonical facts and a named owner hando
   const result = h.incoming('Can you send me information about your company? I have a colleague looking for short sale help.');
   assert.match(result.reply_text, /Crisp Short Sales/);
   assert.match(result.reply_text, /https:\/\/www\.crispshortsales\.com/);
-  assert.doesNotMatch(result.reply_text, /\$5,000/);
+  assert.doesNotMatch(result.reply_text, /\$5,?000/);
   assert.equal(result.handoff_needed, true);
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'REFERRAL / COMPANY INFO'}]);
 });
@@ -61,7 +61,7 @@ test('referral company-info request gets canonical facts and a named owner hando
 test('fee wording request answers only supported facts and routes exact language for review', () => {
   const h = smsHarness();
   const result = h.incoming('What is your fee and what verbiage should I put in the listing and purchase contract?');
-  assert.match(result.reply_text, /\$5,000/);
+  assert.match(result.reply_text, /\$5,?000/);
   assert.match(result.reply_text, /I can go over the exact listing or contract wording with you after I review/);
   assert.doesNotMatch(result.reply_text, /MLS remarks should say|purchase contract must say/);
   assert.equal(result.handoff_needed, true);

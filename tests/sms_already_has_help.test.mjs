@@ -57,7 +57,7 @@ test('not-a-short-sale and self-handling replies do not enter the H campaign', (
 test('existing coverage does not replace a substantive fee answer', () => {
   const h = smsHarness();
   const r = h.incoming('I already have an attorney, but what is your fee?');
-  assert.match(r.reply_text, /\$5,000/);
+  assert.match(r.reply_text, /\$5,?000/);
   assert.notEqual(r.reply_text, backupReply);
 });
 

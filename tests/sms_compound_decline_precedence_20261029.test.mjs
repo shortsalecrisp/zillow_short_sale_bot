@@ -16,7 +16,7 @@ for (const message of [
     'Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks',
     message,
   );
-  assert.doesNotMatch(decision.reply_text, /don't bring the buyer|\$5,000|flat fee/i, message);
+  assert.doesNotMatch(decision.reply_text, /don't bring the buyer|\$5,?000|flat fee/i, message);
 }
 
 for (const message of [
@@ -31,7 +31,7 @@ for (const message of [
     'Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks',
     message,
   );
-  assert.match(decision.reply_text, /\$5,000|don't bring the buyer|best email|lender/i, message);
+  assert.match(decision.reply_text, /\$5,?000|don't bring the buyer|best email|lender/i, message);
 }
 
 {

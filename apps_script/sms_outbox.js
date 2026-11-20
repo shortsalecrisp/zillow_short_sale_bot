@@ -544,7 +544,16 @@ function freezeInitialSmsIdentityV22_(metadata, phone, replyText, messageId, req
       " listed as a short sale. I can take the lender paperwork, calls, and follow-up off your plate. " +
       "There's no service fee to you or the seller; my fee is buyer-paid at closing. " +
       "Are you handling the lender side yourself, or do you already have help?";
-    if (replyText !== normalizeWhitespace_(expectedText)) {
+    var approvedText = "Hi " + current[0] + ", this is Yoni Kutler with Crisp Short Sales. I specialize in helping agents and homeowners " +
+      "with the short sale process and can handle the entire process for you like all the paperwork, phone calls, " +
+      "and coordination that will be required to obtain lender approval. There is no cost to the agent or homeowner " +
+      "for this service - so its completely free to you and your client and i have almost 20 years of experience " +
+      "doing nothing but short sales every single day - so im confident i can help you if youre interested. " +
+      "Do you have some time for a quick call to go over your listing and what we do?";
+    // The new opener omits the address; retain its exact binding internally.
+    var approvedWithProperty = replyText === normalizeWhitespace_(approvedText) &&
+      normalizeWhitespace_(String(metadata.listing_address || "")) === normalizeWhitespace_(String(current[4]));
+    if (replyText !== normalizeWhitespace_(expectedText) && !approvedWithProperty) {
       return fail("Initial SMS opener does not exactly match the current agent and property");
     }
     var displays = sheet.getRange(2, 28, values.length - 1, 1).getDisplayValues();
@@ -624,6 +633,7 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
     stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim(),
     mark_codex_verified: body.mark_codex_verified !== false
   };
+  if (body.listing_address !== undefined) identity.listing_address = normalizeWhitespace_(String(body.listing_address || ""));
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) {
     return { ok: false, queued: false, retryable: true, error: "Initial SMS outbox is temporarily busy" };

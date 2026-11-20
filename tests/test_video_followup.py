@@ -393,9 +393,8 @@ class VideoFollowupTests(unittest.TestCase):
         ready = self.make_ready()
         message, meta = self.service.select(self.context, FALLBACK)
         self.assertEqual(meta["video_variant"], "video")
-        self.assertEqual(message, "Hey just wanted you to see im a real person who can really help you with this short sale.  "
-                         "Please reach out if interested!\n"
-                         "https://go.crispshortsales.com/v/" + ready["id"])
+        approved = json.loads((ROOT / 'tests/fixtures/sms_approved_opener.json').read_text())
+        self.assertEqual(message, approved['video_followup'] + "\nhttps://go.crispshortsales.com/v/" + ready["id"])
         self.assertEqual(self.service.select(self.context, "New fallback"), (message, meta))
         self.assertNotIn(self.context["first_name"], message)
         self.assertNotIn(PHONE, message)

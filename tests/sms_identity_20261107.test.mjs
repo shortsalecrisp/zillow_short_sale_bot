@@ -7,7 +7,8 @@ test('Bryan compound identity question receives deterministic listing context', 
   const r = h.incoming('Apologies I dont have a message from earlier. Who is this, and what is this regarding?');
   assert.equal(r.should_reply, true);
   assert.match(r.reply_text, /Yoni Kutler with Crisp Short Sales/);
-  assert.match(r.reply_text, /645 GREEN VALLEY ROAD #K3/);
+  assert.match(r.reply_text, /Hi Bryan/);
+  assert.match(r.reply_text, /helping agents and homeowners with the short sale process/);
   assert.doesNotMatch(r.reply_text, /your listing at your listing/);
   assert.equal(r.handoff_needed, false);
 });

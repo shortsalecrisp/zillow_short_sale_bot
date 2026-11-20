@@ -146,9 +146,9 @@ class VideoFollowupSchedulerTests(unittest.TestCase):
         self.harness.queue.assert_called_once_with(
             action="enqueue_initial_sms", row_idx=12, phone_digits="12125550100",
             message=self.harness.namespace["SMS_TEMPLATE"].format(first="Jim", address="123 Main Street"),
-            stable_id="listing-12", mark_codex_verified=False,
+            stable_id="listing-12", mark_codex_verified=False, listing_address="123 Main Street",
         )
-        self.assertIn("my fee is buyer-paid at closing", self.harness.queue.call_args.kwargs["message"])
+        self.assertIn("There is no cost to the agent or homeowner", self.harness.queue.call_args.kwargs["message"])
         self.assert_no_direct_delivery_or_sheet_write()
 
     def test_followup_without_initial_timestamp_remains_exact_legacy_text(self):
