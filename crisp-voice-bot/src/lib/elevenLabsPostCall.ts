@@ -686,7 +686,7 @@ export type ExplicitCallbackConsent = {
 
 function callbackTimingWords(value: string, allowBareTime = false): string | undefined {
   const normalized = normalizeText(value);
-  const marker = /\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this (?:morning|afternoon|evening)|next (?:week|month)|later today|asap|as soon as possible|in \d+ (?:minutes?|hours?|days?)|(?:at|around|after|before) (?:\d{1,2}(?::\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:central|pacific|eastern|mountain)|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|central|pacific|eastern|mountain))\b/i.exec(value);
+  const marker = /\b(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this (?:morning|afternoon|evening)|next (?:week|month)|later today|asap|as soon as possible|in(?:\s*,?\s*(?:like|about),?)?\s+\d+ (?:minutes?|hours?|days?)|(?:at|around|after|before) (?:\d{1,2}(?::\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:central|pacific|eastern|mountain)|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|central|pacific|eastern|mountain))\b/i.exec(value);
   if (!marker) {
     return allowBareTime && /^\s*(?:\d{1,2}(?::\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+(?:central|pacific|eastern|mountain))?[.!?]*\s*$/i.test(value)
       ? value.trim().replace(/[.!?]+$/, "") : undefined;
@@ -732,13 +732,20 @@ function isCallbackTimingClarification(value: string): boolean {
 
 function directCallbackRequestClause(value: string): string | undefined {
   let request: string | undefined;
-  for (const match of value.matchAll(/(?:^|[.!?;,])\s*([^.!?;,]+)/g)) {
-    const clause = normalizeText(match[1]);
-    if (!/^(?:(?:yes|sure|ok(?:ay)?)[, ]+)?(?:(?:please|can you|could you|would you|you can)[, ]+)?(?:call (?:me|us)(?=$|\s+(?:back|later|tomorrow|today|tonight|at|after|around|on|next|this|in|when|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)|(?:have|ask) (?:yoni|him) (?:to )?call (?:(?:me|us)(?: back)?|back|later|tomorrow|today|asap|at|after|around)|give (?:me|us) a call|(?:i(?:'d| would) like|i want|i need|can i (?:get|have)) (?:a )?call ?back)\b/.test(clause)) continue;
+  for (const match of value.matchAll(/(?:^|[.!?;])\s*([^.!?;]+)/g)) {
+    let clause = match[1].trim()
+      .replace(/^(?:(?:mm+|hmm+|um+|uh+|well|sorry)[, ]+)*/i, "");
+    let normalizedClause = normalizeText(clause);
+    const embeddedRequest = /\b(?:(?:yes|sure|ok(?:ay)?)[, ]+)?(?:(?:please|can you|could you|would you|you can)[, ]+)?(?:actually[, ]+)?(?:call (?:me|us)\b|(?:have|ask) (?:yoni|him)\b|give (?:me|us) a call\b|(?:i(?:'d| would) like|i want|i need|can i (?:get|have)) (?:a )?call ?back\b)/.exec(normalizedClause);
+    if (embeddedRequest?.index && normalizedClause.slice(0, embeddedRequest.index).includes(",")) {
+      clause = clause.slice(embeddedRequest.index);
+      normalizedClause = normalizeText(clause);
+    }
+    if (!/^(?:(?:yes|sure|ok(?:ay)?)[, ]+)?(?:(?:please|can you|could you|would you|you can)[, ]+)?(?:actually[, ]+)?(?:call (?:me|us)(?=$|\s+(?:back|later|tomorrow|today|tonight|at|after|around|on|next|this|in|when|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)|(?:have|ask) (?:yoni|him) (?:to )?call (?:(?:me|us)(?: back)?|back|later|tomorrow|today|asap|at|after|around)|give (?:me|us) a call|(?:i(?:'d| would) like|i want|i need|can i (?:get|have)) (?:a )?call ?back)\b/.test(normalizedClause)) continue;
     const start = match.index! + match[0].indexOf(match[1]);
     const prefix = normalizeText(value.slice(0, start));
     if (/\b(?:don't|dont|do not|never|not)[,; ]*$/.test(prefix) || /\b(?:if|unless)\b/i.test(value)) continue;
-    request = value.slice(start).trim();
+    request = clause;
   }
   return request;
 }
@@ -761,7 +768,8 @@ export function getExplicitCallbackConsent(conversation: ElevenLabsConversation)
     const scopedText = directRequest ? normalizeText(directRequest) : text;
     const emailOnly = /\b(?:email|text)[- ]only\b|\b(?:only|just) (?:email|text) (?:me|us)\b|\b(?:only|just) send (?:me|us) (?:an? )?(?:email|text)\b|\b(?:email|text)(?: me| us)?(?: the (?:information|info|details))? instead\b/.test(text);
     const timingAnswer = callbackTimingWords(directRequest ?? item.message, /\b(?:what|which) (?:day|time)\b|\bwhen\b.{0,50}\bcall\b/i.test(precedingAssistant));
-    if (emailOnly || /\b(?:cancel|never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you|(?:can|could|may) i call you(?: back)?)\b/.test(scopedText) ||
+    const callbackRevoked = /\bcancel(?: that| the| my)? (?:callback|call back|call)\b|\b(?:never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you|(?:can|could|may) i call you(?: back)?)\b/.test(text);
+    if (emailOnly || callbackRevoked ||
       (/\bnot now\b/.test(scopedText) && !timingAnswer) ||
       /^(?:no|nope|not today)[.! ]*$/.test(scopedText)) {
       consent = undefined;
@@ -1236,7 +1244,8 @@ function confirmedListingWithExplicitServiceDecline(conversation: ElevenLabsConv
   const liveMessages = new Set(liveContactMessages(conversation));
   return messages.some((item, index) => {
     if ((item.role !== "assistant" && item.role !== "agent") ||
-        !/\bis\b.{0,120}\byour listing\b/i.test(item.message ?? "")) return false;
+        !(/\bis\b.{0,120}\byour listing\b/i.test(item.message ?? "") ||
+          /\bdo you (?:have|handle)\b.{0,80}\b(?:this|that|the)?\s*listing\b/i.test(item.message ?? ""))) return false;
     const next = messages.slice(index + 1).find(turn =>
       turn.role === "user" && typeof turn.message === "string" && hasMeaningfulSpokenContent(turn.message));
     if (!next?.message || (!liveMessages.has(next.message) && !hasLiveHumanAfterAutomatedScreening(conversation))) return false;
@@ -1245,12 +1254,13 @@ function confirmedListingWithExplicitServiceDecline(conversation: ElevenLabsConv
         /\b(?:i|we) know how to (?:do|handle) short sales\b/.test(answer) &&
         /\b(?:certified|experienced)\b/.test(answer) &&
         /\b(?:thank you anyway|no thanks|not interested)\b/.test(answer)) return true;
-    return /^(?:yes|yeah|yep|it is|that is mine|that's mine)[, ]+(?:but|and)[, ]+(?:(?:i'm|i am|we're|we are) (?:good|all set|fine|okay|ok)|no thanks|not interested|(?:i|we) (?:do not|don't|dont) need (?:any )?help)(?:[, ]+(?:thanks|thank you))?$/.test(answer);
+    return /^(?:yes|yeah|yep|it is|i do|that is mine|that's mine)[, ]+(?:but|and)[, ]+(?:(?:i'm|i am|we're|we are) (?:good|all set|fine|okay|ok)|no thanks|not interested|(?:i|we) (?:do not|don't|dont) need (?:(?:any|your) )?help)(?:[, ]+(?:thanks|thank you))?$/.test(answer);
   });
 }
 
 export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   const messages = conversation.transcript ?? [];
+  const confirmedListingDecline = confirmedListingWithExplicitServiceDecline(conversation);
   const directPoliteRefusal = messages.some((item, index) =>
     item.role === "user" &&
     /^no[, ]+(?:thanks|thank you)[.!? ]*$/i.test((item.message ?? "").trim()) &&
@@ -1258,7 +1268,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       (prior.role === "assistant" || prior.role === "agent") &&
       typeof prior.message === "string" && hasMeaningfulSpokenContent(prior.message)));
   if (
-    (shouldTreatAsRecordingArtifact(conversation) && !directPoliteRefusal) ||
+    (shouldTreatAsRecordingArtifact(conversation) && !directPoliteRefusal && !confirmedListingDecline) ||
     shouldTreatAsDoNotCall(conversation) ||
     shouldTreatAsCallEndedByRequest(conversation) ||
     shouldTreatAsDeferredContact(conversation) ||
@@ -1343,7 +1353,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
   });
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
-    confirmedListingWithExplicitServiceDecline(conversation) ||
+    confirmedListingDecline ||
     directServiceRefusal ||
     directPoliteRefusal ||
     declinedServiceAfterIdentityClarification(conversation) ||
@@ -1806,6 +1816,23 @@ function nameSoundsSimilar(actualName: string, expectedName: string): boolean {
     actualConsonants.slice(1) === expectedConsonants.slice(1);
 }
 
+export function getDifferentNamedLiveResponder(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): string | undefined {
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z'-]/g, "");
+  if (!expected || shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsVoicemail(conversation)) return undefined;
+  const live = new Set(liveContactMessages(conversation));
+  for (const item of conversation.transcript ?? []) {
+    if (item.role !== "user" || !item.message || !live.has(item.message)) continue;
+    const introduction = item.message.trim().match(/^(?:i am|i['’]?m|this is)[,. ]+([a-z][a-z'-]*)(?: speaking)?[.!? ]*$/i) ??
+      item.message.trim().match(/^([a-z][a-z'-]*) speaking[.!? ]*$/i);
+    const responder = introduction?.[1];
+    if (responder && !nameSoundsSimilar(responder, expected)) return responder;
+  }
+  return undefined;
+}
+
 export function shouldTreatAsIdentityMismatchVoicemail(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
@@ -1912,7 +1939,7 @@ export function hasLiveHumanGatekeeperEvidence(
 
   const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
   const brokeragePrefix = (value: string): boolean =>
-    /\b(?:real estate|realty|properties|brokerage|office|group|team|keller williams|coldwell banker|century 21|compass|e\s*x\s*p|re\/?max|sotheby'?s|berkshire hathaway)\b/.test(value);
+    /\b(?:real estate|realty|properties|brokerage|office|group|team|auctioneers?|keller williams|coldwell banker|century 21|compass|e\s*x\s*p|re\/?max|sotheby'?s|berkshire hathaway)\b/.test(value);
   const brokerageResponder = transcript.map((item, index) => {
     if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
       return undefined;
@@ -1983,7 +2010,13 @@ export function hasLiveHumanGatekeeperEvidence(
       typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
   });
   if (namedOfficePickup) return true;
-  if (contextualUserTurns.length === 0) return differentNamedPickup;
+  const initialOrganizationServiceGreeting = meaningfulUserMessages(conversation).some((message) => {
+    const text = normalizeText(message);
+    const organization = text.match(/^(.{3,80}?)[.!?,]\s*(?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
+    return Boolean(organization) && brokeragePrefix(organization) &&
+      !/\b(?:voicemail|leave (?:a |your )?message|after the (?:tone|beep)|recorded|automated)\b/.test(text);
+  });
+  if (contextualUserTurns.length === 0) return differentNamedPickup || initialOrganizationServiceGreeting;
 
   const contextualText = normalizeText(contextualUserTurns.map((item) => item.message ?? "").join(" "));
   const liveOfficeInteraction =
@@ -2003,7 +2036,10 @@ export function hasLiveHumanGatekeeperEvidence(
   );
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
-    if (/^[a-z0-9 '&-]{2,60}\b(?:realty|real estate|brokerage)[.!?, ]+(?:[a-z]-\s*)?how (?:can|may) i help (?:you|ya)\b/.test(text)) return true;
+    if (/^[a-z0-9 '&-]{2,80}\b(?:realty|real estate|brokerage|auctioneers?)[.!?, ]+(?:(?:[a-z]-\s*)?how )?(?:can|may) i help (?:you|ya)\b/.test(text)) return true;
+    const directOrganizationGreeting = text.match(/^(.{3,80}?)[.!?,]\s*(?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
+    if (directOrganizationGreeting && brokeragePrefix(directOrganizationGreeting) &&
+        !/\b(?:voicemail|leave (?:a |your )?message|after the (?:tone|beep)|recorded|automated)\b/.test(text)) return true;
     const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
     const namedOfficeGreeting = text.match(
       /^(?:thank you for calling|welcome to)\s+(.{2,80}?)[.!?]\s*this is\s+([a-z][a-z'-]*)[.!?, ]+\s*how (?:can|may) i help (?:you|ya)\b/,

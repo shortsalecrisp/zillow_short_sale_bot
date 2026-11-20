@@ -56,6 +56,24 @@ test("verified callback sends one complete hot-lead email, independent of transc
   assert.doesNotMatch(message.text,/Requested Timing:|Sheet row:|Request evidence:|Next action:|Call summary:|ASAP/);
   assert.equal(getVoiceCallbackAlertStatus().independentOfTranscriptEmailToggle,true);
 });
+test("different named responder receives an identity-review callback alert without placing or scheduling a call",async()=>{
+  const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');
+  const f=fixture();f.receipt.transcript=[
+    {role:'user',message:'This is Sam.'},
+    {role:'agent',message:'Would help with lender paperwork or calls be useful for this listing?'},
+    {role:'user',message:'Um, yes, please.'},
+    {role:'user',message:"Um, can you actually call me back in, like, 20 minutes? I'm in a meeting."},
+  ];
+  const service=createVoiceCallbackAlertService(f.deps);await service.enqueue(identity);
+  assert.equal(await service.settle(identity.conversationId),'accepted');
+  assert.equal(f.sent.length,1);
+  assert.equal(f.sent[0].subject,'[IDENTITY REVIEW] CALLBACK REQUEST - Synthetic Owner');
+  assert.match(f.sent[0].text,/IDENTITY REVIEW REQUIRED/);
+  assert.match(f.sent[0].text,/identified themself as Sam/);
+  assert.match(f.sent[0].text,/does not prove Sam is Synthetic Owner/);
+  assert.match(f.sent[0].text,/does not place or schedule a call/);
+  assert.match(f.sent[0].text,/Scheduled Time: in, like, 20 minutes/);
+});
 test("active/pending receipts wait; callback after a missing tool is recovered by durable outbox, not another call",async()=>{
   const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');const f=fixture();f.receipt.status='in-progress';
   const service=createVoiceCallbackAlertService(f.deps);await service.enqueue(identity);await service.recover();assert.equal(f.sent.length,0);

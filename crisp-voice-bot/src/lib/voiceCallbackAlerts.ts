@@ -148,6 +148,7 @@ export function createVoiceCallbackAlertService(deps: CallbackAlertDependencies 
       const consent = classifier.getExplicitCallbackConsent(receipt);
       if (!consent) return (await save(key, state, { status: "cancelled", reason: "no_current_live_callback_consent" })).status;
       const row = await (deps.row ?? readRow)(state.rowNumber);
+      const differentResponder = classifier.getDifferentNamedLiveResponder(receipt, normalizeString(row[0]));
       const proof = { conversationId, phone: state.phone, fullName: state.agentName, listingAddress: state.listingAddress };
       try { verifyVoiceTerminalReceipt(state.rowNumber, row, state.callAttemptNumber, proof, receipt); }
       catch { return (await save(key, state, { status: "held", reason: "current_phone_row_attempt_receipt_mismatch" })).status; }
@@ -158,9 +159,14 @@ export function createVoiceCallbackAlertService(deps: CallbackAlertDependencies 
       const transcript = (receipt.transcript ?? []).filter((item: any) => item.message?.trim())
         .map((item: any) => `${item.role === "user" ? "Caller" : "Maya"}: ${item.message}`).join("\n");
       const summary = String(receipt.analysis?.transcript_summary ?? "No provider summary available.").slice(0, 2000);
+      const identityReview = differentResponder
+        ? `IDENTITY REVIEW REQUIRED: The live responder identified themself as ${differentResponder}, while the lead row names ${state.agentName}. This does not prove ${differentResponder} is ${state.agentName} or authorized to act for that agent. Verify identity before any manual follow-up; this alert does not place or schedule a call.`
+        : "";
       const input = { agentName: state.agentName, phone: state.phone, email: normalizeString(row[3]), listingAddress: state.listingAddress,
+        ...(identityReview ? { subject: `[IDENTITY REVIEW] CALLBACK REQUEST - ${state.agentName}` } : {}),
         rowNumber: state.rowNumber, callbackTime: consent.callbackTime === "unspecified" ? "Not specified by caller" : consent.callbackTime,
-        conversationId, conversationDescription: summary, conversationTranscript: transcript.slice(0, 16000) + (transcript.length > 16000 ? "\n[Transcript shortened; use the recording for the full call.]" : ""),
+        conversationId, conversationDescription: summary,
+        conversationTranscript: `${identityReview ? `${identityReview}\n\n` : ""}${transcript.slice(0, 16000)}` + (transcript.length > 16000 ? "\n[Transcript shortened; use the recording for the full call.]" : ""),
         action: "Review the caller's request and arrange the manual callback; no appointment is confirmed.",
         details: `Caller: ${consent.callerText}${consent.offerText ? ` Accepted offer: ${consent.offerText}` : ""}. Requested timing is preserved without inventing AM/PM or a time zone. ${normalizeString(row[19]) ? "Human takeover is active and unchanged. " : ""}This alert does not place or schedule a call.` };
       const message = buildCallbackEmailMessage(input);
