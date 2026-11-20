@@ -34,7 +34,7 @@ test('identity resend repeats the original sent text even after the template cha
 
 test('identity fallback without a listing never invents an address', () => {
   const r = smsHarness({listing_address: '', initial_text: 'x'}).incoming('Who is this?');
-  assert.equal(r.reply_text, 'Sorry, I had messaged you earlier: ' + opener);
+  assert.equal(r.reply_text, 'Sorry, I had messaged you earlier: ' + opener.replace(' reaching out about the listing on 123 Example Lane', ''));
   assert.doesNotMatch(r.reply_text, /I saw|undefined|null|\{address\}/);
 });
 

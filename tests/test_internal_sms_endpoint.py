@@ -4753,16 +4753,16 @@ def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     assert ask["info_email_approval_required"] is False
 
     provided = module._sms_fast_decision({}, "Please email the info to agent@example.com")
-    assert provided["reply_text"] == ""
+    assert provided["reply_text"] == "Yes, I'll send it to agent@example.com now."
     assert provided["lead_status"] == "Y"
-    assert provided["handoff_needed"] is True
-    assert provided["block_reply"] is True
-    assert provided["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+    assert provided["handoff_needed"] is False
+    assert provided["block_reply"] is False
+    assert provided["handoff_type"] == ""
     assert provided["call_booking_status"] == "information_requested"
     assert provided["callback_time"] == ""
     assert provided["info_email_to"] == "agent@example.com"
-    assert provided["info_email_approval_required"] is True
-    assert module._sms_should_reply(provided, 0) is False
+    assert provided["info_email_approval_required"] is False
+    assert module._sms_should_reply(provided, 0) is True
 
 
 def test_sms_contract_no_current_help_gets_conversational_service_explanation(monkeypatch):
@@ -4828,15 +4828,15 @@ def test_sms_contract_service_info_request_is_answered_before_email_followup(mon
     )
     assert decision["lead_status"] == "O"
     assert decision["conversation_done"] is True
-    assert decision["reply_text"] == ""
-    assert decision["handoff_needed"] is True
-    assert decision["block_reply"] is True
-    assert decision["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+    assert decision["reply_text"] == "Yes, I'll send it to agent@example.com now."
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["handoff_type"] == ""
     assert decision["call_booking_status"] == "information_requested"
     assert decision["callback_time"] == ""
     assert decision["info_email_to"] == "agent@example.com"
-    assert decision["info_email_approval_required"] is True
-    assert module._sms_should_reply(decision, 0) is False
+    assert decision["info_email_approval_required"] is False
+    assert module._sms_should_reply(decision, 0) is True
 
 
 def test_sms_contract_regulatory_license_question_hands_off_without_ai_reply(monkeypatch):

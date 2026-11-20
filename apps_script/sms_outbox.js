@@ -550,8 +550,11 @@ function freezeInitialSmsIdentityV22_(metadata, phone, replyText, messageId, req
       "for this service - so its completely free to you and your client and i have almost 20 years of experience " +
       "doing nothing but short sales every single day - so im confident i can help you if youre interested. " +
       "Do you have some time for a quick call to go over your listing and what we do?";
-    // The new opener omits the address; retain its exact binding internally.
-    var approvedWithProperty = replyText === normalizeWhitespace_(approvedText) &&
+    var addressedText = approvedText.replace("Crisp Short Sales.",
+      "Crisp Short Sales reaching out about the listing on " + String(current[4]).split(",")[0].trim() + ".");
+    // Preserve frozen address-free copy and the same exact internal property binding.
+    var approvedWithProperty = (replyText === normalizeWhitespace_(approvedText) ||
+      replyText === normalizeWhitespace_(addressedText)) &&
       normalizeWhitespace_(String(metadata.listing_address || "")) === normalizeWhitespace_(String(current[4]));
     if (replyText !== normalizeWhitespace_(expectedText) && !approvedWithProperty) {
       return fail("Initial SMS opener does not exactly match the current agent and property");

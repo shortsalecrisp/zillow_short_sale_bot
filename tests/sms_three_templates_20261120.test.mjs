@@ -21,8 +21,15 @@ for (const question of ['What is your fee?', 'How much does it cost?', 'Who pays
 test('new initial fallback matches the new opener without inventing a property address', () => {
   const h = smsHarness({initial_text: 'x', listing_address: ''});
   const result = h.incoming('Who is this?');
-  assert.equal(result.reply_text, 'Sorry, I had messaged you earlier: ' + approved.template.replace('{first}', 'Taylor'));
+  assert.equal(result.reply_text, 'Sorry, I had messaged you earlier: ' + approved.template.replace('{first}', 'Taylor').replace(' reaching out about the listing on {address}', ''));
   assert.equal(h.evaluate(`getDeliveredResponseId_(${JSON.stringify(approved.template)})`), '');
+});
+
+test('initial identity fallback includes only the provided street, not city or state', () => {
+  const h = smsHarness({initial_text: 'x', listing_address: '123 Example Lane, Atlanta, GA 30301'});
+  const result = h.incoming('Who is this?');
+  assert.equal(result.reply_text, 'Sorry, I had messaged you earlier: ' + approved.template.replace('{first}', 'Taylor').replace('{address}', '123 Example Lane'));
+  assert.doesNotMatch(result.reply_text, /Atlanta|30301/);
 });
 
 test('new fee copy retains the delivered-amount repeat handoff', () => {

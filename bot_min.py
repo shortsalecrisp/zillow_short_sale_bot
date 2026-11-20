@@ -541,7 +541,8 @@ logging.info(
     bool(_sms_api_key),
 )
 SMS_TEMPLATE      = (
-    "Hi {first}, this is Yoni Kutler with Crisp Short Sales. I specialize in helping agents and homeowners "
+    "Hi {first}, this is Yoni Kutler with Crisp Short Sales reaching out about the listing on {address}. "
+    "I specialize in helping agents and homeowners "
     "with the short sale process and can handle the entire process for you like all the paperwork, phone calls, "
     "and coordination that will be required to obtain lender approval. There is no cost to the agent or homeowner "
     "for this service - so its completely free to you and your client and i have almost 20 years of experience "
