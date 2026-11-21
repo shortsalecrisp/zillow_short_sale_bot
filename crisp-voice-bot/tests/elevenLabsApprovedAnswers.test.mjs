@@ -148,10 +148,13 @@ test('explicit opt-out and current-call ending markers remain verbatim', () => {
   assert.match(prompt, /A declined transfer, time, channel, or appointment is not a rejection of all service/);
   assert.match(prompt, /I don't have a verified reason for that label. Thanks for correcting it/);
 });
-test('attempt-one voicemail wording is exactly preserved and not reused on attempt two', () => {
+test('attempt-one voicemail remains backend-owned and cannot be recited on attempt two', async () => {
   const expected = "Hi, this is {{assistantName}} with Crisp Short Sales calling about the short sale listing at {{streetAddress}}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.";
   const lines = prompt.split('\n').filter(line => line.startsWith('"Hi, this is {{assistantName}} with Crisp Short Sales calling about'));
-  assert.deepEqual(lines, ['"' + expected + '"']);
-  assert.match(prompt, /Attempt 2: never speak a second message/);
+  assert.deepEqual(lines, []);
+  const backend = await readFile(new URL('../src/lib/elevenLabs.ts', import.meta.url), 'utf8');
+  assert.ok(backend.includes(expected.replace('{{assistantName}}', '${assistantName}').replace('{{streetAddress}}', '${streetAddress}')));
+  assert.match(prompt, /Attempt 2: after a completed mailbox greeting/);
+  assert.match(prompt, /without speech, skip_turn or voicemail_detection/);
   assert.match(prompt, /Wrong-person voicemail protection applies only to a recording, not a live admin/);
 });

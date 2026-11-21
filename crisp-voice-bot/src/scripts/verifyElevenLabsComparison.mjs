@@ -4,16 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const R8_COMPARISON = {
-  cohort: 'maya_uniform_lead_conversion_20261121_r23',
-  startedAt: '2026-11-21T15:56:32.991Z',
+  cohort: 'maya_uniform_lead_conversion_20261121_r24',
+  startedAt: '2026-11-21T17:06:30.267Z',
   agentId: 'agent_9901kpkhs1cmfgj8w9vm199nc92j',
-  sharedHash: '1a2855e7ba6af0dbed55753cccb83cfe99d4a2804d535d66f79c56bb2bfb06ed',
-  workflowHash: 'c69171b21dabd0222361b7af42f2e6e538a3ead460fb93c513cafceedd99626e',
+  sharedHash: '78bd9b9938f344beaeeb9ed16871b9c9c0764ddcce2adcf7ec14f4d5bb939136',
+  workflowHash: '4cac6e95b63d256ecc125c739e8c41d0f23911a8eb7462e523c5f7ed5501ff08',
   waitingAudio: { sound: 'elevator1', availabilityToolId: 'tool_4101m64g0xqteevsgfwtpgxv4he6',
     availabilityToolHash: '6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63' },
   arms: [
-    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_7201m7zd5jzre2ea8ryvzrzvw31d', ttsModel: 'eleven_flash_v2' },
-    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_6501m7zd5n8mee5bjwfznztwt8h9', ttsModel: 'eleven_v4_turbo' },
+    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_1901m7zh4kb1fd6asznabt3ke0e0', ttsModel: 'eleven_flash_v2' },
+    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_9901m7zh4nb1ef1ay4aemtcgcvhe', ttsModel: 'eleven_v4_turbo' },
   ],
 };
 
@@ -23,6 +23,19 @@ export const canonical = value => Array.isArray(value) ? value.map(canonical)
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up some noise in the background. Could you move somewhere quieter?";
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+// Historical r22 only: later cohorts explicitly pin these fields and must retain them.
+export function comparisonBodyR22(agent) {
+  const body = comparisonBody(agent), config = body.conversation_config;
+  const turn = isObject(config) && Object.hasOwn(config, 'turn') ? config.turn : undefined;
+  const timeout = isObject(turn) && Object.hasOwn(turn, 'soft_timeout_config') ? turn.soft_timeout_config : undefined;
+  if (isObject(timeout) && Object.hasOwn(timeout, 'pause_after_filler') && timeout.pause_after_filler === false) {
+    delete timeout.pause_after_filler;
+  }
+  const tts = isObject(config) && Object.hasOwn(config, 'tts') ? config.tts : undefined;
+  if (isObject(tts) && Object.hasOwn(tts, 'gain_db') && tts.gain_db === 0) delete tts.gain_db;
+  return body;
+}
 
 export function comparisonPlatformSettings(settings) {
   const result = structuredClone(settings);

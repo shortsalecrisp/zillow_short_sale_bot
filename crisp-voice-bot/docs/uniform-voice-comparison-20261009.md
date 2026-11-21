@@ -1,6 +1,51 @@
 # Uniform Conversion Comparison
 
-Current revision is r23. Earlier releases are historical and excluded from the r23 comparison.
+Current revision is r24, independently read back at 2026-11-21T17:06:30.267Z. Earlier releases remain historical and are never pooled.
+
+## Approved Revision 24: Prompt Silent Recording Closeout
+
+Yoni approved the r22 validator-only reconciliation, re-verification of all 46 held calls,
+the prospective second-attempt silent-exit repair and monitor pin update after verification.
+This release preserves the separately approved r23 opening guard. Exactly four provider
+strings changed: root policy, embedded opening policy/listening suffix and the two existing
+recording-exit entry conditions. Busy/unavailable terminal screeners plus message invitations
+on attempt two now direct an immediate silent exit without skip_turn, voicemail_detection,
+beep-wait or a spoken message. The conversational voicemail example was removed; the unchanged
+backend tool remains the source of the exact first-attempt message. Empty voicemailMessage
+never authorizes improvisation. Active connecting/hold, incomplete/uncertain recordings,
+later real live speech, pending questions, callbacks, information preferences, opt-outs and
+takeover retain their existing guards and priority. No edge order, exit node, tools, audio,
+models, protected provider setting, local window or consent safeguard changed.
+
+- Cohort: `maya_uniform_lead_conversion_20261121_r24`.
+- Boundary: `2026-11-21T17:06:30.267Z` (November 21, 12:06:30.267 PM America/New_York).
+- Flash: `agtvrsn_1901m7zh4kb1fd6asznabt3ke0e0`, eleven_flash_v2, 50%.
+- v4: `agtvrsn_9901m7zh4nb1ef1ay4aemtcgcvhe`, eleven_v4_turbo, 50%.
+- Root (6,269 words): `724663cff867f9712d3148c7064db02381ca0dd671217abef42b7c32d2ecd887`.
+- Shared: `78bd9b9938f344beaeeb9ed16871b9c9c0764ddcce2adcf7ec14f4d5bb939136`.
+- Workflow: `4cac6e95b63d256ecc125c739e8c41d0f23911a8eb7462e523c5f7ed5501ff08`.
+
+Evidence: `voice-silent-exit-repair-20261121/paired-r24/comparison-plan.json`,
+`comparison-receipt.json` and `independent-final-verification.json` under the original
+task artifact root. Both final versions, protected settings and complete 50/50 allocation
+were independently read back before the boundary. No calls or messages were placed.
+Synthetic tests and readback do not prove future organic silence or acoustic behavior.
+Katrina row7017 and Marielle row6982 remain N, exhausted, with no cadence; do not call again.
+
+## Approved Historical r22 Response Reconciliation, November 21
+
+The exported `comparisonBodyR22` applies only to historical r22 readback copies. Remove
+only own boolean false `conversation_config.turn.soft_timeout_config.pause_after_filler`
+and own numeric zero `conversation_config.tts.gain_db` inside own non-array object
+containers. Absent stays absent; all other values, malformed containers, nested/unrelated
+copies and other fields remain visible. No provider setting is written. Later cohorts
+explicitly pin these fields; their canonical normalizer does not remove them.
+
+Fresh exact r22 version GETs reproduce the original shared/workflow hashes and original
+protected settings. All exact 46 held positive-duration final receipts (Flash19/v4 27)
+were freshly matched to current phone/row/attempt, owning metrics, duplicates and local
+windows. The restored r22 final checkpoint is 46 genuine calls, not true-live or conversion
+counts. r23 history was separately checked with zero calls; neither cohort is pooled into r24.
 
 ## Approved Revision 23: Opening Workflow Guard
 
@@ -8,7 +53,7 @@ The two short-recovery routes require earlier screening or hold evidence in the 
 
 - Cohort: `maya_uniform_lead_conversion_20261121_r23`, boundary `2026-11-21T15:56:32.991Z`.
 - Flash: `agtvrsn_7201m7zd5jzre2ea8ryvzrzvw31d`. v4: `agtvrsn_6501m7zd5n8mee5bjwfznztwt8h9`.
-- The r23 digest includes the current provider response fields `pause_after_filler: false` and `gain_db: 0`; r22 admission remains held under its existing verifier. Organic call behavior still needs evidence.
+- The r23 digest includes the current provider response fields `pause_after_filler: false` and `gain_db: 0`. The later approved r22-only reconciliation above restores its original hashes without altering this cohort. Organic call behavior still needs evidence.
 
 ## Approved Revision 22: Exact AI Answer And Silent Second-Attempt Recording
 

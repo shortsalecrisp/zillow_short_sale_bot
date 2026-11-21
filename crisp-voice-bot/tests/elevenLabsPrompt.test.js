@@ -328,9 +328,10 @@ test("voicemail keeps attempt limits, live-admin distinction and safe mismatch h
   assert.match(s, /Attempt 1:[^\n]+Let the greeting finish/);
   assert.match(s, /do not call voicemail_detection mid-sentence without a clear pause/);
   assert.match(s, /a beep is not required/);
-  assert.match(s, /Attempt 2: never speak a second message/);
-  assert.match(s, /screener says "not available" and invites an "additional message"/);
-  assert.match(s, /use the silent no-message exit before speech or voicemail_detection/);
+  assert.match(s, /Attempt 2: after a completed mailbox greeting/);
+  assert.match(s, /without speech, skip_turn or voicemail_detection/);
+  assert.match(s, /terminal screener saying "busy now", "not available"/);
+  assert.match(s, /transition to recorded_no_voicemail_exit immediately/);
   assert.match(s, /Screening\/hold that is still trying to reach a person is not voicemail and is not an exit reason/);
   assert.match(s, /completed recorded[^\n]+silent no-message exit, not voicemail_detection/);
   assert.match(s, /infer no live opt-out, callback or SMS consent/);

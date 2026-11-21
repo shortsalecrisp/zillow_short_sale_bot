@@ -8,7 +8,8 @@ import {syncComparisonPrompts} from '../src/scripts/syncElevenLabsComparisonProm
 import {NO_VOICEMAIL_CONDITION} from '../src/scripts/elevenLabsNoVoicemailWorkflow.mjs';
 import {digest} from '../src/scripts/verifyElevenLabsComparison.mjs';
 import {applyAiVoicemailRepair,aiVoicemailProtectedHashes,AI_STATUS_OLD,AI_STATUS_NEW,SECOND_ATTEMPT_OLD,SECOND_ATTEMPT_NEW,OPENING_VOICEMAIL_OLD,OPENING_VOICEMAIL_NEW,SECOND_ATTEMPT_RECORDING_CONDITION,AI_VOICEMAIL_PATHS} from '../src/scripts/elevenLabsAiVoicemailRepair.mjs';
-const prompt=extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8'));
+import {OLD_ATTEMPT,NEW_ATTEMPT,OLD_MESSAGE,NEW_MESSAGE,OLD_DELIVERY,NEW_DELIVERY} from '../src/scripts/elevenLabsSilentRecordingExit.mjs';
+const prompt=extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8')).replace(NEW_ATTEMPT,OLD_ATTEMPT).replace(NEW_MESSAGE,OLD_MESSAGE).replace(NEW_DELIVERY,OLD_DELIVERY);
 const old=prompt.replace(AI_STATUS_NEW,AI_STATUS_OLD).replace(SECOND_ATTEMPT_NEW,SECOND_ATTEMPT_OLD);
 function fixture(i=0){
   const edges={},nodes={recorded_no_voicemail_exit:{type:'end',edge_order:[],return_when_nested:true}};
