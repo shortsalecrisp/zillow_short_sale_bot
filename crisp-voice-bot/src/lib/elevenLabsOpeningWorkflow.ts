@@ -13,7 +13,59 @@ export const VOICE_STATE_TRANSITION_NODES = Object.freeze({
   callbackReceiptWait: "callback_receipt_wait",
 });
 
+export const SCREENING_EVIDENCE_GATE =
+  "Short listing recovery requires explicit evidence EARLIER in this call of an automated screening request or a hold/connection announcement before the current live pickup. A spoken name, throat-clearing, a readiness cue, repeated hello, silence, ringing, a placeholder, or a skipped turn alone never establishes screening or hold. When evidence is absent or uncertain, do not enter short listing recovery.";
+
+export const UNSCREENED_PICKUP_POLICY =
+  `On the first unscreened live pickup, a greeting, self-identification (including the expected name), or readiness after skipped noise/silence gets the full opening exactly once: "${VOICE_OPENING_SCRIPT}" Then wait. A question, correction, actual hearing issue, stop request, or contact preference keeps its direct response priority. After a full opening already delivered to the same unscreened listener, handle a presence check in the main conversation without restarting the introduction; repair only the pending question when needed.`;
+
+const RECOVERY_FALLBACK =
+  "Check the evidence before speaking. If you arrived here without explicit earlier screening or hold and the listener has not heard the opening, use the full unscreened opening above. If the same unscreened listener already heard the opening, do not repeat the introduction; handle only the pending question. These fallback rules take precedence over the shortened lines below.";
+
+const RETURN_AFTER_FALLBACK =
+  "If this node was entered without earlier screening/hold, a new substantive live turn after the fallback routes to main before speech, even if a shortened listing check was never spoken.";
+
+const SHORTENED_AFTER_PLACEHOLDER = "deliver that pending short listing check exactly once and then wait";
+const OPEN_AFTER_PLACEHOLDER = "deliver the full unscreened opening exactly once and then wait";
+
+// Apply the same guard to an existing provider workflow without re-creating its
+// nodes, changing edge order, or touching other conversation settings.
+export function hardenExistingOpeningWorkflow<T extends Record<string, any>>(workflow: T): T {
+  const next = structuredClone(workflow);
+  const opening = next.nodes?.opening_listener?.conversation_config?.agent?.prompt;
+  const recovery = next.nodes?.short_listing_recovery?.conversation_config?.agent?.prompt;
+  const main = next.nodes?.main_conversation;
+  const openingEdge = next.edges?.opening_to_short_listing_recovery;
+  const mainEdge = next.edges?.main_to_short_listing_recovery;
+  if (typeof opening?.prompt !== "string" || opening.prompt.split(SHORTENED_AFTER_PLACEHOLDER).length !== 2 ||
+      typeof recovery?.prompt !== "string" || !recovery.prompt.startsWith("# Short listing-check recovery state\n") ||
+      typeof main?.additional_prompt !== "string" || !main.additional_prompt.includes("[CRISP_OPENING_HANDOFF_POLICY]") ||
+      openingEdge?.source !== "opening_listener" || openingEdge.target !== "short_listing_recovery" ||
+      mainEdge?.source !== "main_conversation" || mainEdge.target !== "short_listing_recovery" ||
+      mainEdge.backward_condition?.type !== "llm" || typeof mainEdge.backward_condition.condition !== "string" ||
+      [openingEdge, mainEdge].some(edge => edge.forward_condition?.type !== "llm" ||
+        typeof edge.forward_condition.condition !== "string" || edge.forward_condition.condition.includes(SCREENING_EVIDENCE_GATE))) {
+    throw new Error("Reviewed opening workflow predecessor is required");
+  }
+  opening.prompt = opening.prompt.replace(SHORTENED_AFTER_PLACEHOLDER, OPEN_AFTER_PLACEHOLDER);
+  const openingMarker = "# Opening listener entry\n";
+  if (opening.prompt.split(openingMarker).length !== 2) throw new Error("Opening listener prompt marker drifted");
+  opening.prompt = opening.prompt.replace(openingMarker, `${openingMarker}\n${SCREENING_EVIDENCE_GATE}\n${UNSCREENED_PICKUP_POLICY}\n`);
+  recovery.prompt = recovery.prompt.replace("# Short listing-check recovery state\n",
+    `# Short listing-check recovery state\n\n${SCREENING_EVIDENCE_GATE}\n${UNSCREENED_PICKUP_POLICY}\n${RECOVERY_FALLBACK}\n`);
+  main.additional_prompt = `${main.additional_prompt.trimEnd()}\n\n${SCREENING_EVIDENCE_GATE}\n${UNSCREENED_PICKUP_POLICY}`;
+  for (const edge of [openingEdge, mainEdge]) {
+    edge.forward_condition.condition = `${SCREENING_EVIDENCE_GATE} ${edge.forward_condition.condition}`;
+  }
+  mainEdge.backward_condition.condition += ` ${RETURN_AFTER_FALLBACK}`;
+  return next;
+}
+
 export const SHORT_LISTING_RECOVERY_PROMPT = `# Short listing-check recovery state
+
+${SCREENING_EVIDENCE_GATE}
+${UNSCREENED_PICKUP_POLICY}
+${RECOVERY_FALLBACK}
 
 On first entry, select exactly one entire turn from the actual listener context. After screening/hold, a live listener who explicitly supplies the expected {{firstName}}, including nonverbal throat-clearing, gets only "${VOICE_SHORT_LISTING_RECOVERY}". Never infer identity from the number, screener or placeholder.
 Only when an unnamed or differently named genuinely NEW live person has just joined after automated screening or hold and has not heard your identity, say exactly:
@@ -36,6 +88,9 @@ export const STAGED_MESSAGE_TAKER_POLICY = `A staged message-taking receptionist
 
 export const OPENING_LISTENER_PROMPT = `# Opening listener entry
 
+${SCREENING_EVIDENCE_GATE}
+${UNSCREENED_PICKUP_POLICY}
+
 Start with the pickup and introduction rules. This node shares the complete business policy above. Its label does not freeze the conversation at introduction: after a new caller turn use the shared post-intro, repair, admin, consent and ending rules even if the workflow has not yet transitioned to main_conversation. Never improvise a different qualification question because this node is still active.
 
 Listen first. Do not speak before the recipient finishes their pickup. Do not treat noise, side conversations, ringing or placeholder ... as a live answer; use skip_turn and wait. During the initial greeting, before a NEW live caller reply after the introduction, do not qualify the listing, add to the exact listing-agent check below, or offer a transfer. Once that new reply arrives, the shared business policy and opening handoff contract govern the next response even if this node remains active.
@@ -44,7 +99,7 @@ Only on an initial unscreened pickup, for a new live listener who only says hell
 "${VOICE_OPENING_SCRIPT}"
 Stop after the question. Do not add anything. Wait for a NEW live caller turn. Their pickup before the introduction is not a response to it. Do not repeat the introduction to the same listener because of silence. If the only new transcript is "...", noise or silence, call skip_turn and wait; never say "Are you there?" or restart the introduction.
 
-After a skipped placeholder, noise or silence, a NEW intelligible "Go ahead" or "I'm listening" is a live pickup, not more silence. If this listener has not yet heard the exact opening script, deliver that pending short listing check exactly once and then wait. Do not repeat identity, the full pitch or the listing check if it was already delivered.
+After a skipped placeholder, noise or silence, a NEW intelligible "Go ahead" or "I'm listening" is a live pickup, not more silence. If this listener has not yet heard the exact opening script and there was no earlier screening or hold, ${OPEN_AFTER_PLACEHOLDER}. Do not repeat identity, the full pitch or the listing check if it was already delivered.
 
 A live question, correction, hearing difficulty, contact preference or request belongs under the shared main conversation policy before another introductory sentence. The workflow normally routes it there; if routing is delayed, apply that same policy here rather than guessing, staying silent over the question or repeating the introduction. An intelligible repeated "Hello?" is not noise. A business greeting with "How can I help?" uses the live-admin path, not the normal listing-owner opening. Do not continue an interrupted introduction. Never fabricate consent or promise a callback, email or completed action. A yes confirms the listing only, never interest or transfer permission; use the matched needs question instead of inventing a seller-paperwork question.
 
@@ -144,6 +199,7 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
   workflow.edges.opening_to_short_listing_recovery = {
     source: "opening_listener", target: n.shortListingRecovery, backward_condition: null,
     forward_condition: { type: "llm", label: null, condition: [
+      SCREENING_EVIDENCE_GATE,
       "The call has just passed through automated screening, connecting audio or a hold state, and the latest NEW turn is a live person who only greets, identifies themselves, or says they are on the line.",
       "Route before speaking so the short recovery node asks the one-line listing check.",
       "Do not route on canned hold text, a recording, voicemail, silence, noise, placeholder ..., a substantive question, a correction, or a stop/contact preference.",
@@ -153,6 +209,7 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
   workflow.edges.main_to_short_listing_recovery = {
     source: "main_conversation", target: n.shortListingRecovery,
     forward_condition: { type: "llm", label: null, condition: [
+      SCREENING_EVIDENCE_GATE,
       "The assistant's immediately preceding spoken turn was the live listing-agent introduction or listing check, and the latest NEW live-caller turn is only an intelligible repeated hello or presence check with no question, correction, stop request or contact preference.",
       "Route before speaking so the short recovery node asks only the one-line listing check.",
       "Do not route on silence, noise, placeholder ..., a substantive answer, or a greeting that occurred before the introduction.",
@@ -161,6 +218,7 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
       "The short recovery node already spoke its one listing check and a NEW complete live-caller answer, question, correction, stop request or contact preference arrived after it.",
       "Return to main before speaking so it handles that actual turn.",
       "Do not return on silence, noise, placeholder ..., another bare hello, or an incomplete fragment.",
+      RETURN_AFTER_FALLBACK,
     ].join(" ") },
   };
   workflow.edges.main_to_callback_receipt_wait = {
@@ -212,7 +270,9 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
     "opening_to_main",
   ];
   const previousMainPrompt = workflow.nodes.main_conversation.additional_prompt ?? "";
-  const retainedMainPrompt = previousMainPrompt.replace(/\[CRISP_OPENING_HANDOFF_POLICY\][\s\S]*?\[END_CRISP_OPENING_HANDOFF_POLICY\]/g, "").trim();
-  workflow.nodes.main_conversation.additional_prompt = [retainedMainPrompt, OPENING_HANDOFF_POLICY].filter(Boolean).join("\n\n");
+  const retainedMainPrompt = previousMainPrompt.replace(/\[CRISP_OPENING_HANDOFF_POLICY\][\s\S]*?\[END_CRISP_OPENING_HANDOFF_POLICY\]/g, "")
+    .replace(SCREENING_EVIDENCE_GATE, "").replace(UNSCREENED_PICKUP_POLICY, "").trim();
+  workflow.nodes.main_conversation.additional_prompt = [retainedMainPrompt, OPENING_HANDOFF_POLICY,
+    SCREENING_EVIDENCE_GATE, UNSCREENED_PICKUP_POLICY].filter(Boolean).join("\n\n");
   return updated;
 }

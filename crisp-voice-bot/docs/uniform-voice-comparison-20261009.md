@@ -1,6 +1,14 @@
 # Uniform Conversion Comparison
 
-Current revision is r22, independently verified at 2026-11-19T02:16:54.894Z (November 18 at 9:16:54.894 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r22.
+Current revision is r23. Earlier releases are historical and excluded from the r23 comparison.
+
+## Approved Revision 23: Opening Workflow Guard
+
+The two short-recovery routes require earlier screening or hold evidence in the current call. An unscreened self-introduction or readiness cue gets the full opening. Questions and contact preferences retain priority. The release changed six prompt and edge-condition strings, with provider readback confirming protected configuration, both TTS models and 50/50 allocation.
+
+- Cohort: `maya_uniform_lead_conversion_20261121_r23`, boundary `2026-11-21T15:56:32.991Z`.
+- Flash: `agtvrsn_7201m7zd5jzre2ea8ryvzrzvw31d`. v4: `agtvrsn_6501m7zd5n8mee5bjwfznztwt8h9`.
+- The r23 digest includes the current provider response fields `pause_after_filler: false` and `gain_db: 0`; r22 admission remains held under its existing verifier. Organic call behavior still needs evidence.
 
 ## Approved Revision 22: Exact AI Answer And Silent Second-Attempt Recording
 

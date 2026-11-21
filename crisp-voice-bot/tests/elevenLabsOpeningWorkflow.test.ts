@@ -6,7 +6,9 @@ import {
   applyStagedMessageTakerOpeningPrompt,
   buildOpeningListenerPrompt,
   CALLBACK_RECEIPT_WAIT_PROMPT,
+  hardenExistingOpeningWorkflow,
   OPENING_LISTENER_PROMPT,
+  SCREENING_EVIDENCE_GATE,
   SHORT_LISTING_RECOVERY_PROMPT,
   VOICE_STATE_TRANSITION_NODES,
 } from "../src/lib/elevenLabsOpeningWorkflow";
@@ -56,6 +58,8 @@ test("screening, repeated greetings and callback receipts have dedicated workflo
   assert.equal(after.workflow.edges.opening_to_short_listing_recovery.target, n.shortListingRecovery);
   assert.match(after.workflow.edges.opening_to_short_listing_recovery.forward_condition.condition, /automated screening, connecting audio or a hold state/);
   assert.equal(after.workflow.edges.main_to_short_listing_recovery.target, n.shortListingRecovery);
+  assert.ok(after.workflow.edges.opening_to_short_listing_recovery.forward_condition.condition.startsWith(SCREENING_EVIDENCE_GATE));
+  assert.ok(after.workflow.edges.main_to_short_listing_recovery.forward_condition.condition.startsWith(SCREENING_EVIDENCE_GATE));
   assert.match(after.workflow.edges.main_to_short_listing_recovery.forward_condition.condition, /only an intelligible repeated hello or presence check/);
   assert.match(after.workflow.edges.main_to_short_listing_recovery.backward_condition.condition, /NEW complete live-caller answer/);
   assert.equal(after.workflow.edges.main_to_callback_receipt_wait.target, n.callbackReceiptWait);
@@ -83,8 +87,27 @@ test("a current question routes to main, while an old pickup cannot trigger qual
 test("opening listener resumes once when a caller says go ahead after skipped silence", () => {
   const prompt = applyConversationOpeningWorkflow(base()).workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt;
   assert.match(prompt, /NEW intelligible "Go ahead" or "I'm listening" is a live pickup/);
-  assert.match(prompt, /pending short listing check exactly once/);
+  assert.match(prompt, /full unscreened opening exactly once/);
   assert.match(prompt, /Do not repeat identity, the full pitch or the listing check if it was already delivered/);
+});
+
+test("the provider workflow patch preserves guarded edges, nodes and tool bindings", () => {
+  const { workflow }: any = applyConversationOpeningWorkflow(base());
+  const legacyOpening = workflow.nodes.opening_listener.conversation_config.agent.prompt;
+  legacyOpening.prompt = "# Opening listener entry\nAfter skipped noise, deliver that pending short listing check exactly once and then wait.";
+  const recovery = workflow.nodes.short_listing_recovery.conversation_config.agent.prompt;
+  recovery.prompt = "# Short listing-check recovery state\nRecorded handoff instructions.";
+  for (const edge of ["opening_to_short_listing_recovery", "main_to_short_listing_recovery"]) {
+    workflow.edges[edge].forward_condition.condition = "Existing entry condition.";
+  }
+  const result = hardenExistingOpeningWorkflow(workflow);
+  assert.match(result.nodes.opening_listener.conversation_config.agent.prompt.prompt, /full unscreened opening exactly once/);
+  assert.match(result.nodes.short_listing_recovery.conversation_config.agent.prompt.prompt, /without explicit earlier screening or hold/);
+  assert.match(result.nodes.main_conversation.additional_prompt, /first unscreened live pickup/);
+  assert.deepEqual(result.edges.main_to_callback_receipt_wait, workflow.edges.main_to_callback_receipt_wait);
+  assert.deepEqual(result.nodes.opening_listener.edge_order, workflow.nodes.opening_listener.edge_order);
+  assert.deepEqual(result.nodes.short_listing_recovery.conversation_config.agent.prompt.built_in_tools, recovery.built_in_tools);
+  assert.throws(() => hardenExistingOpeningWorkflow(result), /predecessor/);
 });
 
 test("the live opener is identical in the listener and main prompts", () => {

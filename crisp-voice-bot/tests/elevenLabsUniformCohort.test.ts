@@ -14,10 +14,11 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r22 matched AI and recording repair excludes earlier workflow and prompt cohorts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261118_r22");
-  assert.equal(cohort.startedAt, "2026-11-19T02:16:54.894Z");
-  for (const versionId of ["agtvrsn_9701m7kkxce6ee3te35kr712cz05", "agtvrsn_6901m7kkxe7mfmkbhybrfevv811s", "agtvrsn_3801m7am801ne4qrqjbq6ceycgaz", "agtvrsn_4501m7am82greh08e9t1ztdjfk37", "agtvrsn_6701m6qay8vje668rjwm2n0zv6rw", "agtvrsn_1901m6qayb4gemes8s9gsppz4d7w", "agtvrsn_7101m6kejb9xf0xbye478mxq0ddp", "agtvrsn_0201m6kejettftj8rr5mprm8grg8",
+test("r23 opening guard excludes earlier workflow and prompt cohorts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261121_r23");
+  assert.equal(cohort.startedAt, "2026-11-21T15:56:32.991Z");
+  for (const versionId of ["agtvrsn_2301m7rsddpefbztdt2w86wfj32k", "agtvrsn_9801m7rsdfvhfszap43vvavg4j0y",
+    "agtvrsn_9701m7kkxce6ee3te35kr712cz05", "agtvrsn_6901m7kkxe7mfmkbhybrfevv811s", "agtvrsn_3801m7am801ne4qrqjbq6ceycgaz", "agtvrsn_4501m7am82greh08e9t1ztdjfk37", "agtvrsn_6701m6qay8vje668rjwm2n0zv6rw", "agtvrsn_1901m6qayb4gemes8s9gsppz4d7w", "agtvrsn_7101m6kejb9xf0xbye478mxq0ddp", "agtvrsn_0201m6kejettftj8rr5mprm8grg8",
     "agtvrsn_7601m6q96zm5e1astf8q4314k3wt", "agtvrsn_1701m6q972srexdrxgcf1meegsmr",
     "agtvrsn_7101m6gse6zefeqsa481y18yxjr4", "agtvrsn_9101m6gsebm7fzk85t478vmj1kzc",
     "agtvrsn_8401m6fkph5seyfrr5jbkkk6daq0", "agtvrsn_8501m6fkpkemfrp8q394ewj6atks",
