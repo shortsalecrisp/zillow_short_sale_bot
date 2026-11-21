@@ -1,4 +1,5 @@
 import axios, { AxiosError } from "axios";
+import { isOrganizationServiceGreeting, matchesReviewedFirstName } from "./elevenLabsContactIdentity";
 import { config } from "./config";
 import { logger } from "./logger";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
@@ -1775,19 +1776,7 @@ function nameSoundsSimilar(actualName: string, expectedName: string): boolean {
   if (!actual || !expected) {
     return false;
   }
-  if (actual === expected) {
-    return true;
-  }
-
-  // Keep this list deliberately narrow. These are reviewed, high-confidence
-  // preferred-name or spelling variants; broader nickname inference would
-  // incorrectly collapse genuine wrong-person greetings such as John for
-  // Jonathan/Shawn.
-  const reviewedVariantGroups = [
-    ["montserrat", "monty"],
-    ["emanuel", "emmanuel"],
-  ];
-  if (reviewedVariantGroups.some((group) => group.includes(actual) && group.includes(expected))) {
+  if (matchesReviewedFirstName(actual, expected)) {
     return true;
   }
 
@@ -2010,12 +1999,7 @@ export function hasLiveHumanGatekeeperEvidence(
       typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
   });
   if (namedOfficePickup) return true;
-  const initialOrganizationServiceGreeting = meaningfulUserMessages(conversation).some((message) => {
-    const text = normalizeText(message);
-    const organization = text.match(/^(.{3,80}?)[.!?,]\s*(?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
-    return Boolean(organization) && brokeragePrefix(organization) &&
-      !/\b(?:voicemail|leave (?:a |your )?message|after the (?:tone|beep)|recorded|automated)\b/.test(text);
-  });
+  const initialOrganizationServiceGreeting = meaningfulUserMessages(conversation).some(isOrganizationServiceGreeting);
   if (contextualUserTurns.length === 0) return differentNamedPickup || initialOrganizationServiceGreeting;
 
   const contextualText = normalizeText(contextualUserTurns.map((item) => item.message ?? "").join(" "));
@@ -2037,9 +2021,7 @@ export function hasLiveHumanGatekeeperEvidence(
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
     if (/^[a-z0-9 '&-]{2,80}\b(?:realty|real estate|brokerage|auctioneers?)[.!?, ]+(?:(?:[a-z]-\s*)?how )?(?:can|may) i help (?:you|ya)\b/.test(text)) return true;
-    const directOrganizationGreeting = text.match(/^(.{3,80}?)[.!?,]\s*(?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
-    if (directOrganizationGreeting && brokeragePrefix(directOrganizationGreeting) &&
-        !/\b(?:voicemail|leave (?:a |your )?message|after the (?:tone|beep)|recorded|automated)\b/.test(text)) return true;
+    if (isOrganizationServiceGreeting(text)) return true;
     const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
     const namedOfficeGreeting = text.match(
       /^(?:thank you for calling|welcome to)\s+(.{2,80}?)[.!?]\s*this is\s+([a-z][a-z'-]*)[.!?, ]+\s*how (?:can|may) i help (?:you|ya)\b/,

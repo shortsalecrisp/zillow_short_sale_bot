@@ -1,4 +1,5 @@
 import type { CallMetadata } from "../types";
+import { isOrganizationServiceGreeting, matchesReviewedFirstName } from "./elevenLabsContactIdentity";
 import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
 import {
   hasCallbackOrLaterSignal,
@@ -214,14 +215,16 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
       /^[\p{L}'-]+\s+speaking(?:[.!?]|$)/u.test(text)
     );
     const nameOnly = bareText === normalizeText(fullName) || bareText === expectedFirstName;
-    const targetIdentity = Boolean(expectedFirstName && (identity === expectedFirstName || nameOnly));
+    const nameMatches = matchesReviewedFirstName(identity, expectedFirstName);
+    const targetIdentity = nameMatches || Boolean(expectedFirstName && nameOnly);
     const explicitRole = /\bi(?: am|'m) (?:the )?(?:listing agent|agent of record)\b/.test(text);
     const explicitAdmin = /\b(?:i(?: am|'m)|this is) (?:his |her |their |the |an? )?(?:admin(?:istrative)?(?: assistant)?|assistant|receptionist|transaction coordinator)\b/.test(text) ||
       /\bthis is [\p{L}'-]+[, ]+[^.!?]{0,35}'s (?:assistant|admin|receptionist)\b/u.test(text);
-    const differentNamedAgent = Boolean(identity && expectedFirstName && identity !== expectedFirstName) &&
+    const differentNamedAgent = Boolean(identity && expectedFirstName && !nameMatches) &&
       /^(?:i am|i'm|this is)[,. ]+[\p{L}'-]+[, ]+(?:the )?(?:listing )?agent\b/u.test(text);
     const officeGreeting = Boolean(identity) && /\b(?:real estate|realty|brokerage|office|group|team)\b/.test(text);
-    const differentOfficeSpeaker = Boolean(officeGreeting && identity && expectedFirstName && identity !== expectedFirstName);
+    const differentOfficeSpeaker = Boolean(officeGreeting && expectedFirstName && !nameMatches);
+    const organizationServiceGreeting = isOrganizationServiceGreeting(text);
     const lastQuestion = lastAssistantMessage.match(/(?:^|[.!?])\s*([^.!?]+\?)\s*$/)?.[1] ?? lastAssistantMessage;
     const simpleIdentityQuestion = /\b(?:is this|am i speaking (?:with|to))\b/.test(lastQuestion) ||
       /\bare you the listing agent\b/.test(lastQuestion) || /\bis .{1,120} your listing\?/.test(lastQuestion);
@@ -238,7 +241,7 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
       exactListingQuestion;
     const directHumanQuestion = /\b(?:who is this|why are you calling|what (?:is this|are you calling) about|can you hear me|i can't hear you)\b/.test(text);
     const newLiveIdentity = greeting || namedPickup || explicitRole || explicitAdmin || identityAnswer ||
-      contextualListingAnswer || nameOnly || officeGreeting || directHumanQuestion;
+      contextualListingAnswer || nameOnly || officeGreeting || organizationServiceGreeting || directHumanQuestion;
     const automationContinuation = inAutomation && !newLiveIdentity && (
       canned || /^(?:yes|no|okay|ok|sure)[.!?]*$/.test(text) ||
       /\b(?:can you tell me more about the details|person (?:you called|you're calling|you are calling) (?:is|was)|leave an additional message)\b/.test(text)
@@ -257,7 +260,7 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     hasContextualHumanTurn ||= contextual || ambiguousListingAnswer || explicitRole || explicitAdmin ||
       (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
     if (newLiveIdentity || contextual || ambiguousListingAnswer) inAutomation = false;
-    if (explicitAdmin || differentOfficeSpeaker || differentNamedAgent) gatekeeperIndexes.add(index);
+    if (explicitAdmin || differentOfficeSpeaker || differentNamedAgent || organizationServiceGreeting) gatekeeperIndexes.add(index);
     if (explicitRole || identityAnswer || contextualListingAnswer || targetIdentity) targetIndexes.add(index);
   }
   flush(false);

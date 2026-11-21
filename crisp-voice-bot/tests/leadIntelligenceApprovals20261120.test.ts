@@ -14,6 +14,37 @@ Object.assign(process.env, {
 
 const load = () => import("../src/lib/elevenLabsPostCall");
 
+test("Kerry/Carrie and the how-can-I-help office pickup agree across outcome and metrics", async () => {
+  const lib = await load();
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+  const cases = [
+    { name: "Kerry Duff", pickup: "This is Carrie.", bucket: "target_live" },
+    { name: "Ricardo Ruiz", pickup: "Signature Real Estate Group, how can I help you?", bucket: "human_gatekeeper" },
+    { name: "Sherman Hostetter", pickup: "Sherman Hofstetter Auctioneers. Can I help you?", bucket: "human_gatekeeper" },
+    { name: "Ricardo Ruiz", pickup: "Signature Real Estate Group, how can I help you? Please leave your message after the beep.", bucket: "voicemail" },
+  ];
+  for (const { name, pickup, bucket } of cases) {
+    const conversation = {
+      status: "done",
+      metadata: { termination_reason: "Client disconnected: 1000", call_duration_secs: 8 },
+      transcript: [
+        { role: "user", message: pickup },
+        { role: "agent", message: "Hi, this is Maya with Crisp Short Sales." },
+      ],
+    };
+    const firstName = name.split(" ")[0];
+    const result = lib.getAuthoritativeTerminalCallResult(conversation, 1, { firstName });
+    assert.equal(result === "gatekeeper_admin_early_exit", bucket === "human_gatekeeper", pickup);
+    if (firstName === "Kerry") assert.equal(lib.getDifferentNamedLiveResponder(conversation, firstName), undefined);
+    const log = buildVoicePerformanceLog({
+      conversationId: "conv_pickup",
+      metadata: { rowNumber: 42, fullName: name, callAttemptNumber: 1 },
+      outcome: "", summary: "", transcript: "", conversation, terminalCallResult: result,
+    });
+    assert.equal(JSON.parse(log.split("\n").slice(1).join("\n")).contactEvidence.reviewBucket, bucket, pickup);
+  }
+});
+
 test("Patrick refusal after listing confirmation outranks recording-artifact hangup fallback", async () => {
   const lib = await load();
   const conversation = {
