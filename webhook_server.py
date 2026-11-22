@@ -4986,7 +4986,8 @@ def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
     patterns = [
         r"\b(?:success|approval|approved|close|closing|conversion)\s+rate\b",
         r"\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b",
-        r"\b(?:your|the)\s+(?:stats?|statistics|numbers)\b",
+        r"\b(?:your|the)\s+(?:stats?|statistics)\b",
+        r"\b(?:what(?:['’]?s| is| are)|how\s+(?:are|do))\b.{0,40}\b(?:your|the)\s+(?:performance\s+|success\s+|approval\s+|closing\s+)?numbers\b",
         r"\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
@@ -6908,8 +6909,30 @@ def _sms_is_existing_crisp_relationship(value: Any) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+def _sms_is_open_call_time_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or re.search(
+        r"\b(?:do not|don['’]?t|dont)\s+(?:call|talk|speak|chat|connect)\b", text
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\bwhen\s+(?:is|would be)\s+(?:a\s+)?(?:good|best|convenient)\s+time"
+            r"(?:\s+(?:today|tomorrow))?\s+to\s+(?:talk|speak|chat|call|connect)\b",
+            text,
+        )
+        or re.search(
+            r"\bwhat\s+time(?:\s+(?:today|tomorrow))?\s+(?:would\s+)?(?:work|works|be\s+(?:good|best|convenient))\b"
+            r".{0,40}\b(?:talk|speak|chat|call|connect)\b",
+            text,
+        )
+    )
+
+
 def _sms_is_phone_call_interest(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    if _sms_is_open_call_time_question(text):
+        return True
     if _sms_is_conditional_call(text) or _sms_is_information_delivery_request(text):
         return False
     patterns = [
@@ -7890,6 +7913,7 @@ def _sms_question_priority_decision(
         return None
     interested = _sms_is_present_service_interest(text)
     status = "O" if covered and not interested else "Y"
+    open_call_time_question = _sms_is_open_call_time_question(text)
     requests_call = _sms_is_phone_call_interest(text) or _sms_is_scheduled_callback(text)
     call_now = bool(re.search(r"\b(?:free|available)\s+(?:right\s+)?now\b|\bcall me\s+(?:right\s+)?now\b", text)) and not _sms_is_conditional_call(text)
     fee_decision = _sms_fee_decision(row_obj, inbound_text) if flags["fee"] else None
@@ -7942,9 +7966,14 @@ def _sms_question_priority_decision(
             answers.insert(fee_index + 1, "The fee does not increase if the short-sale negotiation takes longer.")
     if flags["closed_count"]:
         answers.append(replies["closed_count"])
+    if open_call_time_question:
+        answers.append("I'd be happy to talk. What time works best for you?")
     unverified_closed_count = flags["closed_count"] and SMS_VERIFIED_CLOSED_COUNT <= 0
     handoff = unverified_closed_count or requests_call or call_now or flags["different"] or (flags["fee"] and interested)
-    callback = _sms_complete_callback_reference(inbound_text, received_at) if requests_call else ""
+    callback = (
+        _sms_complete_callback_reference(inbound_text, received_at)
+        if requests_call and not open_call_time_question else ""
+    )
     result = _sms_decision(
         reply_text=" ".join(answers),
         lead_status="Y" if requests_call or call_now or flags["different"] else status,
@@ -7959,8 +7988,11 @@ def _sms_question_priority_decision(
                 )
             )
         )) if handoff else "",
-        call_booking_status="scheduled_callback" if callback else ("call_now" if call_now else ""),
+        call_booking_status=("scheduled_callback" if callback else (
+            "call_now" if call_now else ("interested_no_call" if open_call_time_question else "")
+        )),
         callback_time=callback,
+        clear_callback=open_call_time_question,
         bypass_reply_cap=not handoff and (
             bool(fee_decision and fee_decision.get("bypass_reply_cap"))
             or (flags["equator"] and status == "Y")

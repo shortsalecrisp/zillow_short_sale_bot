@@ -502,6 +502,26 @@ test('fee plus present help preserves an owner alert after the answer', () => {
   assert.equal(h.state.human_override, 'TRUE');
 });
 
+test('open call-time plus fee question answers both and creates an unscheduled owner handoff', () => {
+  const {h, r} = answer("This might be something we can talk about. When is a good time today to talk? If you don't charge for your services, how are you compensated?");
+  assert.equal(r.should_reply, true);
+  assert.match(r.reply_text, /\$5000/);
+  assert.match(r.reply_text, /what time works best for you/i);
+  assert.equal(r.handoff_needed, true);
+  assert.equal(h.effects[0].type, 'handoff');
+  assert.equal(h.effects[0].reason, 'HOT LEAD - FEE AND CALL INTEREST');
+  assert.equal(h.state.call_booking_status, 'interested_no_call');
+  assert.equal(h.state.callback_time || '', '');
+  assert.equal(h.state.callback_requested, 'no');
+});
+
+test('ordinary deal numbers are not an unsupported performance-stats question', () => {
+  const h = smsHarness();
+  const ordinary = "The title company gave me your numbers. If the numbers work out, I'll reach out.";
+  assert.equal(h.evaluate(`isUnsupportedPerformanceStatsQuestionSignal_(${JSON.stringify(ordinary)})`), false);
+  assert.equal(h.evaluate('isUnsupportedPerformanceStatsQuestionSignal_("What are your success numbers?")'), true);
+});
+
 test('callback keeps the date, timing qualifier, and timezone', () => {
   const {h, r} = answer('What is your fee? Call me tomorrow after 2 PM Eastern.');
   assert.equal(r.handoff_needed, true);

@@ -2832,18 +2832,28 @@ function isUrgentAuctionReviewSignal_(text) {
 
 function withNewCallHandoff_(decision, text, receivedAt) {
   if (!decision || decision.handoff_needed) return decision;
+  const openCallTimeQuestion = isOpenCallTimeQuestionSignal_(text);
   const feeAndHelp = isPaymentOrFeeQuestionSignal_(text) &&
     (isPresentServiceInterestSignal_(text) || isDirectHelpRequestSignal_(text));
-  if (!isPhoneCallInterestSignal_(text) && !isImmediateCallSignal_(text) &&
-      !isOpenCallWindowSignal_(text) && !isSchedulingSignal_(text) && !feeAndHelp) return decision;
+  const callInterest = isPhoneCallInterestSignal_(text) || isImmediateCallSignal_(text) ||
+    isOpenCallWindowSignal_(text) || isSchedulingSignal_(text) || openCallTimeQuestion;
+  if (!callInterest && !feeAndHelp) return decision;
   decision.handoff_needed = true;
   decision.bypass_reply_cap = false;
   decision.send_reply_before_handoff = true;
   decision.block_reply = false;
-  decision.handoff_type = feeAndHelp ? "HOT LEAD - FEE AND HELP INTEREST" : "HOT LEAD - ANSWERED QUESTION AND CALL INTEREST";
+  decision.handoff_type = isPaymentOrFeeQuestionSignal_(text) && callInterest
+    ? "HOT LEAD - FEE AND CALL INTEREST"
+    : (feeAndHelp ? "HOT LEAD - FEE AND HELP INTEREST" : "HOT LEAD - ANSWERED QUESTION AND CALL INTEREST");
   decision.lead_status = "Y";
   decision.conversation_done = false;
-  if (isSchedulingSignal_(text)) {
+  if (openCallTimeQuestion) {
+    decision.reply_text = normalizeWhitespace_(String(decision.reply_text || "") +
+      " I'd be happy to talk. What time works best for you?");
+    decision.callback_time = "";
+    decision.callback_requested = "no";
+    decision.call_booking_status = "interested_no_call";
+  } else if (isSchedulingSignal_(text)) {
     decision.callback_time = extractCompleteCallbackTiming_(text, receivedAt);
     decision.callback_requested = "yes";
     decision.call_booking_status = "scheduled_callback";
@@ -4014,6 +4024,8 @@ function applyFastRules_(text, rowObj, receivedAt) {
 function isPhoneCallInterestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
+  if (isOpenCallTimeQuestionSignal_(t)) return true;
+
   if (isConditionalCallSignal_(t) || isSchedulingSignal_(t) || isImmediateCallSignal_(t)) {
     return false;
   }
@@ -4034,6 +4046,14 @@ function isPhoneCallInterestSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isOpenCallTimeQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t ||
+      /\b(?:do not|don['’]?t|dont)\s+(?:call|talk|speak|chat|connect)\b/.test(t)) return false;
+  return /\bwhen\s+(?:is|would be)\s+(?:a\s+)?(?:good|best|convenient)\s+time(?:\s+(?:today|tomorrow))?\s+to\s+(?:talk|speak|chat|call|connect)\b/.test(t) ||
+    /\bwhat\s+time(?:\s+(?:today|tomorrow))?\s+(?:would\s+)?(?:work|works|be\s+(?:good|best|convenient))\b.{0,40}\b(?:talk|speak|chat|call|connect)\b/.test(t);
 }
 
 function isBuyerSideProcessingInterestSignal_(text) {
@@ -5253,7 +5273,8 @@ function isUnsupportedPerformanceStatsQuestionSignal_(text) {
   const patterns = [
     /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
     /\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b/,
-    /\b(?:your|the)\s+(?:stats?|statistics|numbers)\b/,
+    /\b(?:your|the)\s+(?:stats?|statistics)\b/,
+    /\b(?:what(?:['’]?s| is| are)|how\s+(?:are|do))\b.{0,40}\b(?:your|the)\s+(?:performance\s+|success\s+|approval\s+|closing\s+)?numbers\b/,
     /\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });

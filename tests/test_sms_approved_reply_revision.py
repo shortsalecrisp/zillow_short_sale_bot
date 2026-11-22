@@ -510,6 +510,26 @@ def test_fee_and_present_help_answer_then_new_handoff_without_call_booking(chatb
     assert result["call_booking_status"] != "scheduled_callback"
 
 
+def test_open_call_time_plus_fee_answers_both_and_creates_unscheduled_handoff(chatbot):
+    result = chatbot.receive(
+        "This might be something we can talk about. When is a good time today to talk? "
+        "If you don't charge for your services, how are you compensated?"
+    )
+    assert FEE_REPLY in result["reply_text"]
+    assert "What time works best for you?" in result["reply_text"]
+    assert result["handoff_needed"] is True
+    assert result["handoff_type"] == "HOT LEAD - FEE AND CALL INTEREST"
+    assert result["call_booking_status"] == "interested_no_call"
+    assert result["callback_time"] == ""
+    assert chatbot.row()["callback_requested"] == "no"
+
+
+def test_deal_numbers_are_not_performance_stats_without_a_metric_question(chatbot):
+    ordinary = "The title company gave me your numbers. If the numbers work out, I'll reach out."
+    assert chatbot.module._sms_is_unsupported_performance_stats_question(ordinary) is False
+    assert chatbot.module._sms_is_unsupported_performance_stats_question("What are your success numbers?") is True
+
+
 def test_conditional_call_alone_never_creates_callback(chatbot):
     result = chatbot.receive("I might consider a call tomorrow if this sounds worthwhile")
     assert result["should_reply"] is False
