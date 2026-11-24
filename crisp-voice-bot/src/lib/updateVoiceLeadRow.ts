@@ -1,3 +1,4 @@
+import { readWithSheetsQuota } from "./sheetsReadQuota";
 import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
 import { getGoogleSheetsClient } from "./googleSheets";
@@ -104,11 +105,11 @@ function clearWrite(writes: SheetCellWrite[], columnNumber: number, field: strin
 }
 
 async function readVoiceLeadRow(sheets: sheets_v4.Sheets, rowNumber: number): Promise<unknown[]> {
-  const response = await sheets.spreadsheets.values.get({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AS${rowNumber}`,
     valueRenderOption: "UNFORMATTED_VALUE",
-  });
+  }));
 
   return response.data.values?.[0] ?? [];
 }

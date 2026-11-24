@@ -212,3 +212,25 @@ test("Eastern Standard timing uses the original callback template once; accepted
  f.states.get(prefix+identity.conversationId).requestedTiming='unspecified';
  await createVoiceCallbackAlertService(f.deps).settle(identity.conversationId);assert.equal(f.sent.length,1);
 });
+
+test("quota-limited outbox recovery leaves the callback pending, then sends once after a fresh read", async () => {
+  const { createVoiceCallbackAlertService } = await import("../src/lib/voiceCallbackAlerts");
+  const { createSheetsReadQuota } = await import("../src/lib/sheetsReadQuota");
+  const f = fixture();
+  let clock = 0;
+  let quotaHits = 2;
+  const readWithQuota = createSheetsReadQuota({ now: () => clock, jitter: () => 0,
+    sleep: async ms => { clock += ms; } });
+  const service = createVoiceCallbackAlertService({ ...f.deps, list: () => readWithQuota(async () => {
+    if (quotaHits-- > 0) throw { response: { status: 429 } };
+    return f.deps.list();
+  }) });
+  await service.enqueue(identity);
+  await assert.rejects(service.recover(), error => (error as any)?.response?.status === 429);
+  assert.equal(f.states.get(prefix + identity.conversationId)?.status, "awaiting_final");
+  assert.equal(f.sent.length, 0);
+  await service.recover();
+  await service.recover();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.states.get(prefix + identity.conversationId)?.status, "accepted");
+});

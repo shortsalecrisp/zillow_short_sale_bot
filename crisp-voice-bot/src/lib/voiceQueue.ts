@@ -1,3 +1,4 @@
+import { readWithSheetsQuota } from "./sheetsReadQuota";
 import axios, { AxiosError } from "axios";
 import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
@@ -352,11 +353,11 @@ function candidateSummary(candidate: VoiceQueueCandidate) {
 }
 
 async function getVoiceBotRows(sheets: sheets_v4.Sheets): Promise<Array<{ rowNumber: number; values: unknown[] }>> {
-  const response = await sheets.spreadsheets.values.get({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A2:AP`,
     valueRenderOption: "UNFORMATTED_VALUE",
-  });
+  }));
   const values = response.data.values ?? [];
 
   return values.map((row, index) => ({
@@ -366,11 +367,11 @@ async function getVoiceBotRows(sheets: sheets_v4.Sheets): Promise<Array<{ rowNum
 }
 
 async function getVoiceBotRowByNumber(sheets: sheets_v4.Sheets, rowNumber: number): Promise<unknown[]> {
-  const response = await sheets.spreadsheets.values.get({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AP${rowNumber}`,
     valueRenderOption: "UNFORMATTED_VALUE",
-  });
+  }));
 
   return response.data.values?.[0] ?? [];
 }
@@ -741,9 +742,9 @@ export async function reconcileOverdueVoiceMailshakeFallback(
   const proof = (dependencies.getEvidence ?? getOrWarmVoiceFallbackEvidence)(since, now, () =>
     processVoiceQueue({ fallbackOnly: true, refill: true }));
   if (!proof) return 0;
-  const inbound = await sheets.spreadsheets.values.get({
+  const inbound = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId, range: "'sms_inbound_queue'!A2:H",
-  });
+  }));
   let released = 0;
   for (const oldPlan of plans) {
     if (released >= 20) break;
@@ -822,13 +823,13 @@ export async function readVoiceSafeReplacementState(
     VOICE_BOT_COL_CALL_TIME_BUCKET,
     VOICE_BOT_COL_CALL_SCHEDULED_FOR,
   ];
-  const response = await sheets.spreadsheets.values.batchGet({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.batchGet({
     spreadsheetId: config.googleSheets.sheetId,
     ranges: columns.map((columnNumber) =>
       cellRange(config.googleSheets.tabName, columnToLetter(columnNumber), rowNumber),
     ),
     valueRenderOption: "UNFORMATTED_VALUE",
-  });
+  }));
   const values = (response.data.valueRanges ?? []).map((range) =>
     normalizeString(range.values?.[0]?.[0]),
   );
@@ -1100,8 +1101,8 @@ export async function reconcileUncertainVoiceCallStarts(
           },
         ]);
       } else if (receipt?.status === "definitive_failure") {
-        const fresh = await sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
-          range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${row.rowNumber}:AP${row.rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" });
+        const fresh = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
+          range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${row.rowNumber}:AP${row.rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" }));
         const values = fresh.data.values?.[0] ?? [];
         if (isVoiceAutomatedCallCancelled(row.rowNumber, values)) {
           logger.info("Definitive call-start failure remains cancelled; no replacement scheduled", {

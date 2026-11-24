@@ -1,3 +1,4 @@
+import { readWithSheetsQuota } from "./sheetsReadQuota";
 import { createHash } from "node:crypto";
 import addressparser from "nodemailer/lib/addressparser";
 import { config } from "./config";
@@ -42,8 +43,8 @@ function validate(state: CallbackAlertState, id: string): void {
 
 async function readRow(rowNumber: number): Promise<unknown[]> {
   const sheets = await getGoogleSheetsClient();
-  const result = await sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
-    range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AS${rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" });
+  const result = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
+    range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AS${rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" }));
   return result.data.values?.[0] ?? [];
 }
 

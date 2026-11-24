@@ -1,3 +1,4 @@
+import { readWithSheetsQuota } from "./sheetsReadQuota";
 import type { sheets_v4 } from "googleapis";
 import { logger } from "./logger";
 import {
@@ -123,10 +124,10 @@ export async function getInboundQuietGate(
   now = new Date(),
 ): Promise<InboundQuietGate> {
   const { config } = await import("./config");
-  const response = await sheets.spreadsheets.values.get({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: "'sms_inbound_queue'!A2:H",
-  });
+  }));
   const rows = response.data.values ?? [];
   return evaluateInboundQuietGate(phone, rows.slice(-500), now);
 }

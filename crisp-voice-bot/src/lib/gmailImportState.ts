@@ -1,3 +1,4 @@
+import { readWithSheetsQuota } from "./sheetsReadQuota";
 import { config } from "./config";
 import { getGoogleSheetsClient } from "./googleSheets";
 
@@ -16,10 +17,10 @@ async function ensureStateSheetExists(): Promise<void> {
     const sheets = await getGoogleSheetsClient();
     const spreadsheetId = config.googleSheets.sheetId;
     const title = config.gmailImporters.stateSheetName;
-    const spreadsheet = await sheets.spreadsheets.get({
+    const spreadsheet = await readWithSheetsQuota(() => sheets.spreadsheets.get({
       spreadsheetId,
       fields: "sheets.properties.title",
-    });
+    }));
     const exists = (spreadsheet.data.sheets ?? []).some((sheet) => sheet.properties?.title === title);
 
     if (!exists) {
@@ -32,7 +33,7 @@ async function ensureStateSheetExists(): Promise<void> {
     }
 
     const range = `${quoteSheetName(title)}!A1:C1`;
-    const header = await sheets.spreadsheets.values.get({ spreadsheetId, range }).catch(() => undefined);
+    const header = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({ spreadsheetId, range }));
     const first = header?.data.values?.[0] ?? [];
     if (first[0] !== "key" || first[1] !== "json" || first[2] !== "updated_at") {
       await sheets.spreadsheets.values.update({
@@ -44,16 +45,21 @@ async function ensureStateSheetExists(): Promise<void> {
     }
   })();
 
-  return ensuredStateSheet;
+  try {
+    return await ensuredStateSheet;
+  } catch (error) {
+    ensuredStateSheet = undefined;
+    throw error;
+  }
 }
 
 async function readStateRows(): Promise<string[][]> {
   await ensureStateSheetExists();
   const sheets = await getGoogleSheetsClient();
-  const response = await sheets.spreadsheets.values.get({
+  const response = await readWithSheetsQuota(() => sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `${quoteSheetName(config.gmailImporters.stateSheetName)}!A:C`,
-  });
+  }));
   return (response.data.values ?? []) as string[][];
 }
 
@@ -68,7 +74,9 @@ export function parseGmailImportState<T>(serialized: string, fallback: T, strict
 
 export async function readGmailImportState<T>(key: string, fallback: T, strict = false): Promise<T> {
   const rows = await readStateRows();
-  const row = rows.find((candidate) => candidate[0] === key);
+  const matches = rows.filter((candidate) => candidate[0] === key);
+  if (strict && matches.length > 1) throw new Error("Duplicate notification state; reconcile before delivery");
+  const row = matches[0];
   if (!row) {
     return fallback;
   }
