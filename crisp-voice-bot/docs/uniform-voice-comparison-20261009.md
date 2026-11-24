@@ -1,6 +1,28 @@
 # Uniform Conversion Comparison
 
-Current revision is r24, independently read back at 2026-11-21T17:06:30.267Z. Earlier releases remain historical and are never pooled.
+Current revision is r25, read back at 2026-11-24T12:25:59.421Z. Earlier releases remain historical and are never pooled.
+
+## Approved Revision 25: Same-Language AI Disclosure
+
+Yoni approved the Lead Intelligence corrections and provider release. The only provider
+change is the root prompt's AI/robot/computer answer: Maya must disclose truthfully in the
+caller's current language, including the exact reviewed Spanish answer, and must never deny
+AI status. All tools, workflow edges, audio, TTS models, turn model, phone bindings, protected
+settings and native 50/50 allocation remain unchanged. The paired publisher performed an
+exact r24 version and prompt-hash precondition check, wrote both arms once, and read back the
+complete comparison. No call or metered session was started.
+
+- Cohort: `maya_uniform_lead_conversion_20261124_r25`.
+- Boundary: `2026-11-24T12:25:59.421Z` (November 24, 7:25:59.421 AM America/New_York).
+- Flash: `agtvrsn_0901m86ra5erfe0vc79g474s6k9p`, eleven_flash_v2, 50%.
+- v4: `agtvrsn_2401m86ra8jzfevacyr1rb0581fk`, eleven_v4_turbo, 50%.
+- Root (6,285 words): `99611d35ede2f755905f4f0e568c1d0a7ebf9b95d8a059a11dca702ad4c2b1b0`.
+- Shared: `c6f07086566f7f58ab9d4ba3f494bb6e3310db17ae2bb450bc4a02c56cec2c1e`.
+- Workflow: `4cac6e95b63d256ecc125c739e8c41d0f23911a8eb7462e523c5f7ed5501ff08`.
+
+The live paired receipt is `/tmp/voice-ai-disclosure-r25/comparison-receipt.json` on the
+publishing service instance. Synthetic tests and configuration readback do not prove future
+organic caller behavior.
 
 ## Approved Revision 24: Prompt Silent Recording Closeout
 
