@@ -1,6 +1,52 @@
 # Uniform Conversion Comparison
 
-Current revision is r25, read back at 2026-11-24T12:25:59.421Z. Earlier releases remain historical and are never pooled.
+Current revision is r26, independently read back at 2026-11-24T12:32:44.718Z. Earlier releases remain historical and are never pooled.
+
+## Approved Revision 26: Opening And Native Silent Ending
+
+Yoni approved the November 23 monitor findings. The guarded paired publisher changed
+exactly five string leaves: root policy, embedded opening policy/listening suffix,
+main-conversation opening policy and both existing recording-exit entry conditions.
+An unscreened first hello/name/readiness cue requires the full Maya/Crisp introduction;
+a name or repeated hello alone never proves the listener heard it. Actual prior
+screening/hold, delivered identity, confirmed listing and pending-question recovery remain
+distinct. The embedded root is also brought into exact agreement with r25's approved
+same-language AI disclosure; the r25 root had changed without changing that embedded prefix.
+
+Completed second-attempt mailbox or terminal unavailable/message invitations use native
+voicemail_detection only with an empty voicemailMessage, whose successful empty-message
+result ends the call. No speech, improvised message, skip_turn or additional beep-wait
+is allowed. The existing recording-only silent end remains fallback when that tool is
+unavailable or its payload is not empty. First-attempt messages, explicit no-message and
+unrelated-recording exits, active hold, uncertain/incomplete recordings, later real live
+speech/questions, callbacks, information preferences, opt-outs and takeover keep priority.
+No tool configuration, routing order, exit node, voices/models, audio, protected setting,
+consent rule, schedule or local window changed. Both arms remain native 50/50.
+
+- Cohort: `maya_uniform_lead_conversion_20261124_r26`.
+- Boundary: `2026-11-24T12:32:44.718Z` (November 24, 7:32:44.718 AM America/New_York).
+- Flash: `agtvrsn_6001m86rnxehf518mvew9ag9cpzd`, eleven_flash_v2, 50%.
+- v4: `agtvrsn_8901m86rp00wff4a7rd97dfr2ca7`, eleven_v4_turbo, 50%.
+- Root (6,299 words): `0c03fe95564803a76fae062433f9254653bbeaa2ea1b06aa36dce01fd56227be`.
+- Shared: `d432abcf04075ad1175b4de50bcde27877622ca5131173e8212c804c1a5c2982`.
+- Workflow: `86a1d97d080dea9d2ec47afe59c2146c2768aa6f7518a70792ad82e7f71aaf42`.
+
+Evidence: `voice-flow-callback-repair-20261124/paired-r26/comparison-plan.json`,
+`comparison-receipt.json` and `independent-final-verification.json` under the original
+task artifact root. Canonical comparison performs exactly three GETs plus a separate
+shared-audio GET; normalizers are unchanged. No calls, sessions or messages were placed.
+Configuration and synthetic tests do not prove organic or acoustic silence. Inherited
+r24 mailbox receipts show native empty-message completion without assistant transcript,
+not playback-validated silence; a terminal-screener organic case remains unproven.
+
+The shared backend now preserves Standard/Daylight timezone words in explicit callback
+timing through the original hot-lead template, retaining durable no-resend protection.
+A narrow immediate negative needs answer such as Greta's "No, a contract would be useful"
+is classified as not interested, not generic hangup; a new question or contact request
+retains priority. Greta row7077's J/AH labels were corrected after exact final-receipt
+and fresh row readback; existing N status, history, preferences and empty cadence stayed
+unchanged. Cally's accepted alert was not replayed by this repair. Earlier r24/r25 calls
+and checkpoints remain separate and are never admitted to r26.
 
 ## Approved Revision 25: Same-Language AI Disclosure
 

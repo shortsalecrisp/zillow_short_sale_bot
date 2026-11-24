@@ -1,14 +1,15 @@
 import {digest} from './verifyElevenLabsComparison.mjs';
 import {sha256} from './syncElevenLabsPromptOnly.mjs';
 import {NEW_OPENING as OLD_RECORDING_POLICY,SILENT_RECORDING_CONDITION as OLD_EXIT_CONDITION} from './elevenLabsSilentRecordingExit.mjs';
+import {AI_DISCLOSURE_OLD,AI_DISCLOSURE_NEW} from './elevenLabsMultilingualAiDisclosure.mjs';
 export const FLOW_ROOT_REPLACEMENTS=[
   [
     "- A second clarification alone is never permission to say goodbye. Answer pending questions; preserve refusal, stop and opt-out priority. Never invent another channel's consent. A repeated \"Hello?\" before listing confirmation gets only \"Is {{streetAddress}} your listing?\" AFTER confirmation, say \"I'm here.\" and repeat ONLY the unanswered question once. If the needs question is pending: \"I'm here. Would help with lender paperwork or calls be useful for this listing?\" Never reset confirmed identity, re-pitch, or treat continued silence as consent to end.",
-    "- A second clarification never authorizes goodbye. Answer pending questions; preserve refusal, stop and opt-out priority. Before any introduction, repeated \"Hello?\" still requires the unscreened opening. Only a listener who already heard your identity gets the short listing check while unconfirmed. AFTER confirmation, say \"I'm here.\" and repeat ONLY the unanswered question once. If needs are pending: \"I'm here. Would help with lender paperwork or calls be useful for this listing?\" Never reset confirmed identity, re-pitch or treat silence as ending consent."
+    "- A second clarification never authorizes goodbye. Answer pending questions; preserve refusal, stop and opt-out priority. Never invent another channel's consent. Before any introduction, repeated \"Hello?\" still requires the unscreened opening. Only listeners who heard your identity get the short listing check while unconfirmed. AFTER confirmation, say \"I'm here.\" and repeat ONLY the unanswered question once. If needs are pending: \"I'm here. Would help with lender paperwork or calls be useful for this listing?\" Never reset confirmed identity, re-pitch or treat silence as ending consent."
   ],
   [
     "If this live listener has not heard your introduction and only greets you, your entire spoken turn is:",
-    "Without an actual earlier screening/hold announcement, the first live hello, name or readiness cue requires this entire opening once. Names, repeated hellos or skipped silence never prove delivered identity:"
+    "Without earlier screening/hold, the first live hello, name or readiness cue requires this entire opening once. Names, repeated hellos or skipped silence never prove delivered identity:"
   ],
   [
     "Answer first-turn questions from the answer library without an introduction or repeated identity/purpose. After screening/hold, select BEFORE speech: a matching spoken {{firstName}}, including \"This is Jasmine\" plus throat-clearing or nonverbal cues, gets only \"Is {{streetAddress}} your listing?\" An unnamed hello or differently named listener gets \"Hi, {{assistantName}} with Crisp Short Sales. Is {{streetAddress}} your listing?\" Never use the full opener after screening. Do not infer identity from the number, screener or placeholder. A same-listener repeated hello gets only the listing question while unconfirmed; otherwise repair only the pending question.",
@@ -35,7 +36,7 @@ export function applyLiveFlowRepair(agent,prompt){
  const tool=agent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection;
  if(tool?.params?.voicemail_message!=='{{voicemailMessage}}'||tool.force_pre_tool_speech!==false)throw Error('Unchanged native voicemail payload binding required');
  const a=structuredClone(agent),marker='\n\n[CRISP_OPENING_HANDOFF_POLICY]',parts=a.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt.split(marker);
- if(parts.length!==2||parts[0]!==old||a.workflow.nodes.recorded_no_voicemail_exit?.type!=='end')throw Error('Matched root/listener and existing silent exit required');
+ if(parts.length!==2||parts[0]!==once(old,AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD)||a.workflow.nodes.recorded_no_voicemail_exit?.type!=='end')throw Error('Exact r25 root/r24 embedded predecessor and existing silent exit required');
  a.conversation_config.agent.prompt.prompt=prompt;
  a.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt=prompt+marker+once(once(parts[1],OLD_HANDOFF,NEW_HANDOFF),OLD_RECORDING_POLICY,NATIVE_RECORDING_POLICY);
  a.workflow.nodes.main_conversation.additional_prompt=once(a.workflow.nodes.main_conversation.additional_prompt,OLD_HANDOFF,NEW_HANDOFF);

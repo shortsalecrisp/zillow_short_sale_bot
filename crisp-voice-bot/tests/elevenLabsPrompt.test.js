@@ -35,7 +35,8 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale lender paperwork\. Is \{\{streetAddress\}\} your listing\?"/);
+  assert.match(s, /requires this entire opening once/);
+  assert.match(s, /\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale lender paperwork\. Is \{\{streetAddress\}\} your listing\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
   assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
@@ -78,13 +79,13 @@ test("a question keeps the entire response answer-only even after it is answered
 test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
   const s = section("Intro only");
-  assert.match(s, /Answer first-turn questions from the answer library without an introduction or repeated identity\/purpose/);
-  assert.match(s, /After screening\/hold, select BEFORE speech/);
+  assert.match(s, /Answer first-turn questions directly, without repeating an introduction/);
+  assert.match(s, /Shortening requires actual earlier automated screening\/hold, never just a name or hello/);
   assert.match(s, /matching spoken \{\{firstName\}\}/);
   assert.match(s, /Hi, \{\{assistantName\}\} with Crisp Short Sales\. Is \{\{streetAddress\}\} your listing\?/);
-  assert.match(s, /same-listener repeated hello gets only the listing question while unconfirmed/);
-  assert.match(s, /otherwise repair only the pending question/);
-  assert.match(s, /Never use the full opener after screening/);
+  assert.match(s, /After delivered identity, repeat only the pending listing check while unconfirmed/);
+  assert.match(s, /after confirmation repair only the pending question/);
+  assert.match(s, /Do not repeat the full opener after screening/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -101,7 +102,7 @@ test("specific purpose, ambiguous what and hearing restoration have distinct bou
   assert.match(s, /We help listing agents with short-sale lender paperwork and calls/);
   assert.match(s, /A bare "What\?", "Huh\?" or "I don't understand" does not establish hearing loss, rejection or a particular missing fact/);
   assert.match(s, /Did you miss who I am, or what we help with\?/);
-  assert.match(s, /A second clarification alone is never permission to say goodbye/);
+  assert.match(s, /A second clarification never authorizes goodbye/);
   assert.doesNotMatch(s, /I'll let you go\. Goodbye\./);
   assert.match(s, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
@@ -116,9 +117,10 @@ test("bounded repair preserves understood fragments and never guesses consent", 
   assert.match(s, /Do not repeat the full opening or guess the answer/);
   assert.match(s, /Never invent another channel's consent/);
   assert.match(s, /preserve refusal, stop and opt-out priority/);
-  assert.match(s, /A repeated "Hello\?" before listing confirmation gets only "Is \{\{streetAddress\}\} your listing\?"/);
+  assert.match(s, /Before any introduction, repeated "Hello\?" still requires the unscreened opening/);
+  assert.match(s, /Only listeners who heard your identity get the short listing check while unconfirmed/);
   assert.match(s, /AFTER confirmation, say "I'm here\." and repeat ONLY the unanswered question once/);
-  assert.match(s, /Never reset confirmed identity, re-pitch, or treat continued silence as consent to end/);
+  assert.match(s, /Never reset confirmed identity, re-pitch or treat silence as ending consent/);
 });
 
 test("a confirmed listing plus a purpose question remains answer-only", () => {
@@ -329,9 +331,9 @@ test("voicemail keeps attempt limits, live-admin distinction and safe mismatch h
   assert.match(s, /do not call voicemail_detection mid-sentence without a clear pause/);
   assert.match(s, /a beep is not required/);
   assert.match(s, /Attempt 2: after a completed mailbox greeting/);
-  assert.match(s, /without speech, skip_turn or voicemail_detection/);
-  assert.match(s, /terminal screener saying "busy now", "not available"/);
-  assert.match(s, /transition to recorded_no_voicemail_exit immediately/);
+  assert.match(s, /invoke voicemail_detection immediately ONLY when \{\{voicemailMessage\}\} is empty/);
+  assert.match(s, /terminal busy\/unavailable screener inviting a message/);
+  assert.match(s, /If the tool is unavailable or the payload is not empty, use recorded_no_voicemail_exit instead/);
   assert.match(s, /Screening\/hold that is still trying to reach a person is not voicemail and is not an exit reason/);
   assert.match(s, /completed recorded[^\n]+silent no-message exit, not voicemail_detection/);
   assert.match(s, /infer no live opt-out, callback or SMS consent/);

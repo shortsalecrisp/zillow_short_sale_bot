@@ -7,13 +7,14 @@ import {extractPrompt,sha256} from '../src/scripts/syncElevenLabsPromptOnly.mjs'
 import {comparisonBody,digest} from '../src/scripts/verifyElevenLabsComparison.mjs';
 import {syncComparisonPrompts} from '../src/scripts/syncElevenLabsComparisonPrompts.mjs';
 import {NEW_OPENING,SILENT_RECORDING_CONDITION} from '../src/scripts/elevenLabsSilentRecordingExit.mjs';
+import {AI_DISCLOSURE_OLD,AI_DISCLOSURE_NEW} from '../src/scripts/elevenLabsMultilingualAiDisclosure.mjs';
 import {applyLiveFlowRepair,restoreR24Prompt,buildLiveFlowPrompt,liveFlowProtectedHashes,FLOW_PATHS,OLD_HANDOFF,NEW_HANDOFF,NATIVE_RECORDING_POLICY,NATIVE_RECORDING_EXIT_CONDITION} from '../src/scripts/elevenLabsLiveFlowRepair.mjs';
 const prompt=extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8')),old=restoreR24Prompt(prompt);
 function fixture(i=0){
  const nodes={recorded_no_voicemail_exit:{type:'end',edge_order:[]}},edges={};
  for(const c of ['opening_listener','main_conversation']){
   const id=c+'_to_recorded_no_voicemail_exit',guards=['terminal_contact_from_'+c,'terminal_guard_from_'+c];
-  nodes[c]={type:'override_agent',edge_order:[...guards,id],additional_prompt:OLD_HANDOFF,conversation_config:{agent:{prompt:{prompt:old+'\n\n[CRISP_OPENING_HANDOFF_POLICY]'+OLD_HANDOFF+' '+NEW_OPENING,tool_ids:['protected']}}}};
+  nodes[c]={type:'override_agent',edge_order:[...guards,id],additional_prompt:OLD_HANDOFF,conversation_config:{agent:{prompt:{prompt:old.replace(AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD)+'\n\n[CRISP_OPENING_HANDOFF_POLICY]'+OLD_HANDOFF+' '+NEW_OPENING,tool_ids:['protected']}}}};
   edges[id]={source:c,target:'recorded_no_voicemail_exit',forward_condition:{type:'llm',condition:SILENT_RECORDING_CONDITION}};
   for(const g of guards)edges[g]={source:c,target:'guard',forward_condition:{type:'llm',condition:'Preserve callbacks, opt-outs, pending questions and takeover.'}};
  }
