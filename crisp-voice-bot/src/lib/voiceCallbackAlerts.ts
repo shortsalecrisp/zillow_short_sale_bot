@@ -155,7 +155,16 @@ export function createVoiceCallbackAlertService(deps: CallbackAlertDependencies 
       const held = holdReason(row);
       if (held) return (await save(key, state, { status: "held", reason: held })).status;
       if (await inboundBlocked(state.phone)) return "awaiting_final";
-      state = await save(key, state, { requestedTiming: consent.callbackTime });
+      const owningCallbackRequested = ["yes", "true", "1"].includes(normalizeString(row[37]).toLowerCase());
+      const owningCallbackTime = normalizeString(row[38]);
+      // The live callback tool can persist exact caller timing before the final
+      // transcript settles. If final parsing retains consent but loses only the
+      // timing, preserve the fresh owning Sheet value instead of downgrading the
+      // owner alert to "unspecified". Never recover timing without the matching
+      // row's current callback-request flag.
+      const callbackTime = consent.callbackTime === "unspecified" && owningCallbackRequested && owningCallbackTime
+        ? owningCallbackTime : consent.callbackTime;
+      state = await save(key, state, { requestedTiming: callbackTime });
       const transcript = (receipt.transcript ?? []).filter((item: any) => item.message?.trim())
         .map((item: any) => `${item.role === "user" ? "Caller" : "Maya"}: ${item.message}`).join("\n");
       const summary = String(receipt.analysis?.transcript_summary ?? "No provider summary available.").slice(0, 2000);
@@ -164,7 +173,7 @@ export function createVoiceCallbackAlertService(deps: CallbackAlertDependencies 
         : "";
       const input = { agentName: state.agentName, phone: state.phone, email: normalizeString(row[3]), listingAddress: state.listingAddress,
         ...(identityReview ? { subject: `[IDENTITY REVIEW] CALLBACK REQUEST - ${state.agentName}` } : {}),
-        rowNumber: state.rowNumber, callbackTime: consent.callbackTime === "unspecified" ? "Not specified by caller" : consent.callbackTime,
+        rowNumber: state.rowNumber, callbackTime: callbackTime === "unspecified" ? "Not specified by caller" : callbackTime,
         conversationId, conversationDescription: summary,
         conversationTranscript: `${identityReview ? `${identityReview}\n\n` : ""}${transcript.slice(0, 16000)}` + (transcript.length > 16000 ? "\n[Transcript shortened; use the recording for the full call.]" : ""),
         action: "Review the caller's request and arrange the manual callback; no appointment is confirmed.",

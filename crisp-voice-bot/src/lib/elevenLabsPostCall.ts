@@ -1284,6 +1284,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     if ((item.role !== "assistant" && item.role !== "agent") || !item.message) return false;
     const question = normalizeText(item.message);
     const helpQuestion = /\bwould help with\b.{0,100}\bbe useful\b/.test(question);
+    const spanishHelpQuestion = /\bte gustar[ií]a ayuda con\b.{0,120}\b(?:papeleo|tr[aá]mites|llamadas)\b/.test(question);
     const priorHelpQuestion = messages.slice(0, index).some(prior =>
       (prior.role === "assistant" || prior.role === "agent") &&
       /\bwould help with\b.{0,100}\bbe useful\b/i.test(prior.message ?? ""));
@@ -1291,7 +1292,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       /\bwould (?:that|this) help on (?:this|the) file\?/.test(question) ||
       (/\bwe help (?:collect|prepare)\b.{0,100}\b(?:documents?|paperwork|lender|bank)\b/.test(question) &&
         /\bwould you like\b/.test(question)));
-    if (!helpQuestion && !clarification) return false;
+    if (!helpQuestion && !spanishHelpQuestion && !clarification) return false;
     // Never borrow a No from a later assistant question, a recording or a callback request.
     for (const next of messages.slice(index + 1)) {
       if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
@@ -1461,12 +1462,12 @@ function hasTruncatedFirstPersonCallbackGreeting(conversation: ElevenLabsConvers
 function hasFirstPersonVoicemailGreeting(conversation: ElevenLabsConversation): boolean {
   return userMessages(conversation).some((message) => {
     const text = normalizeText(message);
-    const firstPersonIntroduction = /^(?:(?:hi|hello|good (?:morning|afternoon|evening))[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}\b/.test(text);
+    const firstPersonIntroduction = /^(?:(?:hi|hello|aloha|good (?:morning|afternoon|evening))[\s,.!?-]+)?(?:this is|you(?:'ve| have) reached)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}\b/.test(text);
     const leaveContactInstruction = /\b(?:please|kindly)?\s*leave\s+(?:me\s+)?(?:your\s+)?(?:name|number|phone number|contact information|details?|message)\b/.test(text);
     const emailInstruction = /\b(?:please\s+)?(?:email me|send me an email|contact me by email|reach me by email|send (?:the|your|that|this) (?:information|info|details?) (?:to|by) email)\b/.test(text);
-    const textInstruction = /\b(?:please\s+)?(?:text (?:me|us|this number|the number)|send (?:me|us) (?:a )?text(?: message)?)\b/.test(text);
+    const textInstruction = /\b(?:please\s+)?(?:text (?:me|us|this number|the number)|send (?:me|us) (?:a )?text(?: message)?|leave (?:me|us) (?:a )?(?:brief )?text message)\b/.test(text);
     const unavailableOrReturnCue = /\b(?:sorry i missed your call|can't (?:answer|take) (?:the |your )?call|cannot (?:answer|take) (?:the |your )?call|away from (?:my )?phone|not available|i(?:'ll| will) (?:call|get) (?:you )?back|return your call|get back to you)\b/.test(text);
-    const reachedGreeting = /^(?:(?:hi|hello)[, ]+)?you(?:'ve| have) reached\b/.test(text);
+    const reachedGreeting = /^(?:(?:hi|hello|aloha)[\s,.!?-]+)?you(?:'ve| have) reached\b/.test(text);
     const recordedSignoff = /\b(?:thanks|thank you|goodbye|have a (?:great|good|nice) day)\b[.! ]*$/.test(text);
     return firstPersonIntroduction && (
       (leaveContactInstruction && unavailableOrReturnCue) ||
@@ -1506,6 +1507,7 @@ export function getVoicemailOrNoAnswerCallResult(
 }
 
 export type AuthoritativeTerminalCallResult =
+  | "do_not_call"
   | "identity_mismatch_voicemail"
   | "voicemail_left"
   | "voicemail_reached"
@@ -1524,6 +1526,11 @@ export function getAuthoritativeTerminalCallResult(
   callAttemptNumber: number,
   expected: { firstName?: string; lastName?: string; fullName?: string; email?: string } = {},
 ): AuthoritativeTerminalCallResult | undefined {
+  // A live opt-out is stronger than a generic disconnect, wrong-contact,
+  // recording, or hangup label and must suppress every later voice attempt.
+  if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation)) {
+    return "do_not_call";
+  }
   if (shouldTreatAsIdentityMismatchVoicemail(
     conversation,
     expected.firstName ?? "",
@@ -1539,8 +1546,15 @@ export function getAuthoritativeTerminalCallResult(
     return getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber) ?? "agent_not_available";
   }
 
-  const unresolvedPhoneMenu = isRecordingOrScreeningArtifact(conversation.transcript ?? []) &&
-    userMessages(conversation).some(message => /\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(message));
+  const callerTurns = (conversation.transcript ?? []).filter(item => item.role === "user" && typeof item.message === "string");
+  const phoneMenuIndexes = callerTurns.flatMap((item, index) =>
+    /\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(item.message ?? "") ? [index] : []);
+  const lastPhoneMenuIndex = phoneMenuIndexes.at(-1) ?? -1;
+  const explicitLivePickupAfterMenu = callerTurns.slice(lastPhoneMenuIndex + 1).some(item =>
+    /\b(?:this is [a-z][a-z'-]*|[a-z][a-z'-]* speaking|how (?:can|may) i help|yes[, ]+that is my listing)\b/i.test(item.message ?? "") &&
+    !/\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(item.message ?? ""));
+  const unresolvedPhoneMenu = phoneMenuIndexes.length > 0 && !explicitLivePickupAfterMenu &&
+    (isRecordingOrScreeningArtifact(conversation.transcript ?? []) || phoneMenuIndexes.length >= 2);
   if ((unresolvedPhoneMenu || hasTerminalNonleadPlayback(conversation)) && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
     return "agent_not_available";
   }
@@ -1857,6 +1871,8 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   const namedGreeting = text.match(
     /\b(?:you(?:'ve| have) reached|this is|mailbox (?:for|belonging to)|voicemail (?:for|of))\s+([a-z][a-z'-]*)(?:\s+([a-z][a-z'-]*))?\b/,
   );
+  const namedOrganizationGreeting = /\b(?:you(?:'ve| have) reached|this is)\s+[a-z0-9 &'/-]{2,80}\b(?:enterprises?|realty|real estate|properties|brokerage|group|team|company|inc|llc|corp(?:oration)?)\b/.test(text) &&
+    !/\bthis is [a-z][a-z'-]*\s+with\b/.test(text);
   const greetingLast = normalizeText(namedGreeting?.[2] ?? "").replace(/[^a-z0-9'-]/g, "");
   const matchingSurname = Boolean(expectedLast && greetingLast && greetingLast === expectedLast);
   // A row can store a middle/preferred name with the surname (for example
@@ -1879,7 +1895,7 @@ export function shouldTreatAsIdentityMismatchVoicemail(
     ),
   );
   if (
-    namedGreeting && expected && !mentionsExpectedTarget && !matchingSurname && !matchingVerifiedMiddleName &&
+    namedGreeting && !namedOrganizationGreeting && expected && !mentionsExpectedTarget && !matchingSurname && !matchingVerifiedMiddleName &&
     !nameSoundsSimilar(namedGreeting[1], expected)
   ) {
     return true;
@@ -2606,7 +2622,7 @@ async function processPostCallOutcomeForConversationUnlocked(
       : {
           callResult: terminalCallResult,
           responseStatus: outcome,
-          ...(["answered_not_interested", "identity_mismatch_voicemail", "wrong_contact"].includes(terminalCallResult)
+          ...(["do_not_call", "answered_not_interested", "identity_mismatch_voicemail", "wrong_contact"].includes(terminalCallResult)
             ? { leadStatusCode: "R" } : {}),
           ...(automatedMessageTaker ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "apparent_human_early_exit" ? { leadStatusCode: "N" } : {}),
@@ -3380,7 +3396,16 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (hasLiveHumanAssistantExchange(conversation) &&
+  const hasReviewableLiveEvidence = (conversation.transcript ?? []).some((item, index, turns) => {
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) return false;
+    const answer = normalizeText(item.message).replace(/[.!?]+/g, "").trim();
+    if (/^(?:hello|hi|hey|can you hear me|are you there|anyone there|\.\.\.)$/.test(answer)) return false;
+    const priorAssistant = [...turns.slice(0, index)].reverse().find(prior =>
+      (prior.role === "assistant" || prior.role === "agent") && typeof prior.message === "string")?.message ?? "";
+    return answer.split(/\s+/).length >= 3 ||
+      (/^(?:yes|yeah|yep|correct|it is)$/.test(answer) && /\bis\b.{1,120}\byour listing\?/i.test(priorAssistant));
+  });
+  if (hasReviewableLiveEvidence && hasLiveHumanAssistantExchange(conversation) &&
       /(?:silence|no response|lost connection)/i.test(conversation.metadata?.termination_reason ?? "")) {
     const outcome = "Live person reached; connection lost; follow-up requires review";
     await persistSheetUpdate({ rowNumber: metadata.rowNumber, callAttemptNumber: metadata.callAttemptNumber,

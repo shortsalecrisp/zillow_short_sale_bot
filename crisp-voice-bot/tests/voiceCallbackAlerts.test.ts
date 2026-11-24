@@ -45,6 +45,20 @@ test("Darcy-style filler preserves the requested time in the original template a
   const {buildCallbackEmailMessage}=await import('../src/lib/sendCallbackEmail');
   assert.equal(f.sent[0].subject,buildCallbackEmailMessage({agentName:identity.agentName,phone:identity.phone,listingAddress:identity.listingAddress,callbackTime:'Today at 4:00 p.m'}).subject);
 });
+test("final consent parsing cannot downgrade an exact owning callback time to unspecified",async()=>{
+  const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');
+  const f=fixture();
+  f.row[37]='yes';f.row[38]="tomorrow morning, ten o'clock a.m., Eastern Standard";
+  f.receipt.transcript=[
+    {role:'agent',message:'Would you like me to request a callback from Yoni?'},
+    {role:'user',message:'Yes.'},
+  ];
+  const service=createVoiceCallbackAlertService(f.deps);await service.enqueue(identity);
+  assert.equal(await service.settle(identity.conversationId),'accepted');
+  assert.equal(f.states.get(prefix+identity.conversationId).requestedTiming,f.row[38]);
+  assert.match(f.sent[0].text,/Scheduled Time: tomorrow morning, ten o'clock a\.m\., Eastern Standard/);
+  assert.doesNotMatch(f.sent[0].text,/Not specified by caller/);
+});
 test("verified callback sends one complete hot-lead email, independent of transcript toggle; restart and replay cannot duplicate",async()=>{
   const {createVoiceCallbackAlertService,getVoiceCallbackAlertStatus}=await import('../src/lib/voiceCallbackAlerts');
   const f=fixture(),before=[...f.row],service=createVoiceCallbackAlertService(f.deps);

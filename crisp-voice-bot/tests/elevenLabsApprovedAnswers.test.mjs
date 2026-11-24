@@ -128,8 +128,12 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
 });
 test('all AI-status questions receive the exact answer without an unsolicited explanation', () => {
-  assert.match(prompt, /AI\/robot\/automated\/robocall questions, including "Is this a robocall\?", "Are you AI\?" or switching to AI voice: "I'm already an AI assistant with Crisp Short Sales\."/);
-  assert.match(prompt, /Answer an accompanying substantive question; otherwise wait/);
+  assert.match(prompt, /AI\/robot\/computer questions/);
+  assert.match(prompt, /disclose truthfully in the caller's current language/);
+  assert.match(prompt, /English: "I'm already an AI assistant with Crisp Short Sales\."/);
+  assert.match(prompt, /Spanish: "Sí\. Ya soy una asistente de inteligencia artificial de Crisp Short Sales\."/);
+  assert.match(prompt, /Never deny AI status/);
+  assert.match(prompt, /Answer an accompanying substantive question in the same language; otherwise wait/);
   assert.match(prompt, /Do not add a service explanation, listing check or Yoni offer without a new clear request/);
   assert.doesNotMatch(prompt, /Are you AI: "Yes,/);
 });
