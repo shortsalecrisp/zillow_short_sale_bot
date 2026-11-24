@@ -121,7 +121,7 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(repair, /Answer the specific missing point, then wait; do not append permission, qualification or a handoff offer/);
   assert.match(repair, /If the next turn specifies a missing point, answer only that point/);
   assert.match(repair, /Did you miss who I am, or what we help with\?/);
-  assert.match(repair, /A second clarification alone is never permission to say goodbye/);
+  assert.match(repair, /A second clarification never authorizes goodbye/);
   assert.match(repair, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(repair, /Do not claim the connection or volume was fixed/);
   assert.match(prompt, /No declines only that offer; follow the stated email, later-callback or other preference/);
@@ -159,6 +159,7 @@ test('attempt-one voicemail remains backend-owned and cannot be recited on attem
   const backend = await readFile(new URL('../src/lib/elevenLabs.ts', import.meta.url), 'utf8');
   assert.ok(backend.includes(expected.replace('{{assistantName}}', '${assistantName}').replace('{{streetAddress}}', '${streetAddress}')));
   assert.match(prompt, /Attempt 2: after a completed mailbox greeting/);
-  assert.match(prompt, /without speech, skip_turn or voicemail_detection/);
+  assert.match(prompt, /invoke voicemail_detection immediately ONLY when \{\{voicemailMessage\}\} is empty/);
+  assert.match(prompt, /Never speak, improvise a message, skip_turn or wait for a beep afterward/);
   assert.match(prompt, /Wrong-person voicemail protection applies only to a recording, not a live admin/);
 });

@@ -129,7 +129,9 @@ test("screening, voicemail and unrelated recording exit remain separate", () => 
   assert.match(OPENING_LISTENER_PROMPT, /staged message-taking receptionist is also automated/);
   assert.match(OPENING_LISTENER_PROMPT, /After the first completed farewell, say exactly "Goodbye\." once/);
   assert.match(OPENING_LISTENER_PROMPT, /On attempt two, a completed mailbox greeting or terminal "busy now"/);
-  assert.match(OPENING_LISTENER_PROMPT, /recorded_no_voicemail_exit immediately: no speech, skip_turn, voicemail_detection, beep-wait or silence loop/);
+  assert.match(OPENING_LISTENER_PROMPT, /voicemail_detection immediately ONLY with empty voicemailMessage/);
+  assert.match(OPENING_LISTENER_PROMPT, /native empty-message result ends the call silently/);
+  assert.match(OPENING_LISTENER_PROMPT, /If that tool is unavailable or the payload is not empty, use recorded_no_voicemail_exit/);
   assert.equal(result.workflow.nodes.unrelated_recording_exit.type, "end");
   assert.equal(result.workflow.nodes.unrelated_recording_exit.return_when_nested, true);
   assert.equal(result.workflow.nodes.unrelated_recording_exit.parent_subgraph_id, null);

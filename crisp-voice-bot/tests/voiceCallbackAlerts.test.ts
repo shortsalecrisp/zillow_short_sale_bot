@@ -202,3 +202,13 @@ test("new delivery activation does not reset on restart or replay historical com
   const first=await s.activate();assert.equal((await createVoiceCallbackAlertService(deps).activate()).activatedAt,first.activatedAt);
   assert.equal(await s.settle(identity.conversationId),'held','pre-activation call requires duplicate review, never blind historical resend');assert.equal(f.sent.length,0);
 });
+test("Eastern Standard timing uses the original callback template once; accepted alerts never resend",async()=>{
+ const {createVoiceCallbackAlertService}=await import('../src/lib/voiceCallbackAlerts');
+ const f=fixture();f.receipt.transcript=[{role:'agent',message:'Would you like me to request a callback?'},{role:'user',message:'Yes.'},{role:'agent',message:'What time would you like to request?'},{role:'user',message:'Tomorrow morning, 10:00 a.m., Eastern Standard.'},{role:'agent',message:"Thanks. I've received your callback request."}];
+ const service=createVoiceCallbackAlertService(f.deps);await service.enqueue(identity);assert.equal(await service.settle(identity.conversationId),'accepted');
+ assert.match(f.sent[0].text,/Scheduled Time: Tomorrow morning, 10:00 a.m., Eastern Standard/);
+ assert.match(f.sent[0].html,/<strong>Scheduled Time:<\/strong> Tomorrow morning, 10:00 a.m., Eastern Standard/);
+ await service.settle(identity.conversationId);await createVoiceCallbackAlertService(f.deps).recover();assert.equal(f.sent.length,1);
+ f.states.get(prefix+identity.conversationId).requestedTiming='unspecified';
+ await createVoiceCallbackAlertService(f.deps).settle(identity.conversationId);assert.equal(f.sent.length,1);
+});

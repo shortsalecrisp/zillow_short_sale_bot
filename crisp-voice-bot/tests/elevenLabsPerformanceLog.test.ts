@@ -983,6 +983,11 @@ test("callback tool fire, caller request, capture receipt and completion are dis
   conversation.transcript[4].tool_results![0].result_value = '{"requestCaptured":true,"callbackTime":"today at four o clock p m"}'.replace('o clock', "o'clock");
   const spoken = await measurementLog({ conversation, callbackConsent: { callbackTime: "Today at 4:00 p.m" } });
   assert.equal(spoken.handoffEvidence.callbackRequestCaptured, true);
+  conversation.transcript[4].tool_results![0].result_value = JSON.stringify({requestCaptured:true,callbackTime:"tomorrow morning, ten o'clock a.m., Eastern Standard"});
+  const zoned = await measurementLog({conversation,callbackConsent:{callbackTime:"Tomorrow morning, 10:00 a.m., Eastern Standard"}});
+  assert.equal(zoned.handoffEvidence.callbackRequestCaptured,true);
+  const differentZone = await measurementLog({conversation,callbackConsent:{callbackTime:"Tomorrow morning, 10:00 a.m., Pacific Standard"}});
+  assert.equal(differentZone.handoffEvidence.callbackRequestCaptured,false);
   conversation.transcript[4].tool_results![0].result_value = '{"requestCaptured":true,"queued":true,"callbackTime":"tomorrow at four"}';
   const corrected = await measurementLog({ conversation, callbackConsent: { callbackTime: "tomorrow at five" } });
   assert.equal(corrected.handoffEvidence.callbackRequestCaptured, false);

@@ -226,7 +226,7 @@ test("purpose repair answers the question without a count-triggered ending", () 
   const prompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
   assert.match(prompt, /We help listing agents with short-sale lender paperwork and calls/);
   assert.match(prompt, /I'm calling about the short-sale listing at \{\{streetAddress\}\}/);
-  assert.match(prompt, /A second clarification alone is never permission to say goodbye/);
+  assert.match(prompt, /A second clarification never authorizes goodbye/);
   assert.match(prompt, /Actual opt-outs, service refusals, current-call stops and genuine goodbyes retain their priority/);
   assert.doesNotMatch(prompt, /I'll let you go\. Goodbye\./);
   assert.doesNotMatch(prompt, /Would you prefer a person/);

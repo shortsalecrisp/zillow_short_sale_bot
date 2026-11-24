@@ -10,7 +10,7 @@ export const VOICE_CALLBACK_RECEIPT_ACK = "Thanks. I've received your callback r
 
 export const OPENING_HANDOFF_POLICY = [
   "[CRISP_OPENING_HANDOFF_POLICY]",
-  `The normal live opening is exactly: "${VOICE_OPENING_SCRIPT}"`,
+  `Before any earlier screening/hold announcement or delivered identity, a live hello, name or readiness cue MUST get exactly: "${VOICE_OPENING_SCRIPT}" A matching name or repeated hello alone never permits a bare listing question. First-turn questions, contact preferences and live admins keep their direct-response paths.`,
   "A new clear yes to that single listing question confirms listing ownership only, not interest in help, a callback, or a live transfer.",
   `If that new reply contains no question, correction, hearing issue or requested next step, say exactly: "${VOICE_NEEDS_QUESTION}" Then wait.`,
   "A clear yes to that exact needs question is durable interest unless the caller later explicitly rejects help or opts out. Briefly explain what Crisp handles, then use the base prompt's single explicit live-Yoni-now offer and wait. Answer a caller's substantive question first and make the one offer only after that question is resolved.",

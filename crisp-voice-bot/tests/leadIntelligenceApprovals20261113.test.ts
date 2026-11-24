@@ -31,9 +31,10 @@ test("self-identified target after screening gets only the short listing questio
   assert.match(OPENING_HANDOFF_POLICY, /explicitly identifies themself as the expected target/);
   assert.ok(OPENING_HANDOFF_POLICY.includes(VOICE_SHORT_LISTING_RECOVERY));
   assert.match(prompt, /matching spoken \{\{firstName\}\}/);
-  assert.match(prompt, /throat-clearing or nonverbal cues/);
-  assert.match(prompt, /Never use the full opener after screening/);
-  assert.match(prompt, /An unnamed hello or differently named listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
+  assert.match(prompt, /Only AFTER that announcement: a matching spoken/);
+  assert.match(prompt, /Do not repeat the full opener after screening/);
+  assert.match(prompt, /an unnamed or differently named new listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
+  assert.match(prompt, /A matching name, repeated hello or skipped silence never proves the person heard your identity/);
 });
 
 test("named target after screening outranks gatekeeper persistence", async () => {

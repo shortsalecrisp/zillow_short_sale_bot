@@ -725,7 +725,7 @@ function isCallbackTimingClarification(value: string): boolean {
   const timeWords = new Set(("today tomorrow tonight monday tuesday wednesday thursday friday saturday sunday " +
     "this next morning afternoon evening noon midnight week weeks month months minute minutes hour hours day days " +
     "at on in after before around about from to until and or not now instead rather than the a an same time zone " +
-    "am pm a m p eastern central mountain pacific est edt cst cdt mst mdt pst pdt " +
+    "am pm a m p eastern central mountain pacific standard daylight saving savings est edt cst cdt mst mdt pst pdt " +
     "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen " +
     "eighteen nineteen twenty thirty forty fifty sixty half quarter past o'clock").split(" "));
   return words.length > 0 && words.every(word => /^\d+$/.test(word) || timeWords.has(word));
@@ -1299,6 +1299,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       if (next.role !== "user" || !liveMessages.has(next.message)) return false;
       const answer = normalizeText(next.message).replace(/^(?:(?:uh+|oh|n-)[, ]*)/, "");
       if (/^(?:no[, ]+)?(?:we're|we are) all good(?: on (?:it|this|that|the file))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer)) return true;
+      if (helpQuestion && /^(?:no|nope)[,; ]+(?:(?:a|an|the) )?(?:(?:signed|purchase) )?(?:contract|offer|buyer) would be (?:useful|helpful)(?:[,.! ]+(?:thanks|thank you))?[.! ]*$/.test(answer)) return true;
       return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:['’]m| am) (?:(?:doing|handling) (?:everything|it|this|the file)|okay|ok|good|fine|all set)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
     }
     return false;
