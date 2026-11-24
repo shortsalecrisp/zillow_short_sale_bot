@@ -298,7 +298,7 @@ function getCallStartUncertainPayload(error: unknown): Omit<VoiceCallStartUncert
 
 let activeQueueRun: Promise<VoiceQueueResult> | undefined;
 let schedulerTimer: NodeJS.Timeout | undefined;
-export const VOICE_QUEUE_MAX_PARALLEL_STARTS = 2;
+export const VOICE_QUEUE_MAX_PARALLEL_STARTS = 1;
 
 export async function dispatchVoiceQueueBatch<T>(
   candidates: T[],

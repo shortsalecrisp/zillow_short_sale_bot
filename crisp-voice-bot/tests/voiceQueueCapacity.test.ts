@@ -30,6 +30,21 @@ async function fixtures() {
   return { q, rows };
 }
 
+test("default dispatch serializes starts", async () => {
+  const { q } = await fixtures();
+  let active = 0;
+  let peak = 0;
+  const visited: number[] = [];
+  await q.dispatchVoiceQueueBatch([1, 2, 3, 4], async candidate => {
+    visited.push(candidate);
+    peak = Math.max(peak, ++active);
+    await flush();
+    active--;
+  });
+  assert.deepEqual(visited, [1, 2, 3, 4]);
+  assert.equal(peak, 1);
+});
+
 test("parallel dispatch is bounded, visits each candidate once, and settles before unlocking", async () => {
   const { q } = await fixtures();
   const releases: Array<() => void> = [];
@@ -38,7 +53,7 @@ test("parallel dispatch is bounded, visits each candidate once, and settles befo
   const run = q.dispatchVoiceQueueBatch([1, 2, 3, 4], async (candidate) => {
     visited.push(candidate);
     await new Promise<void>((resolve) => releases.push(resolve));
-  }).then(() => { settled = true; });
+  }, 2).then(() => { settled = true; });
   await flush();
   assert.deepEqual(visited, [1, 2]);
   releases.shift()!();
@@ -60,7 +75,7 @@ test("a persistence error stops new dispatches and waits for the other in-flight
     visited.push(candidate);
     if (candidate === 1) throw new Error("synthetic persistence failure");
     await new Promise<void>((resolve) => { release = resolve; });
-  });
+  }, 2);
   const rejected = assert.rejects(run, /synthetic persistence failure/);
   await flush();
   assert.deepEqual(visited, [1, 2]);
