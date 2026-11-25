@@ -14,10 +14,11 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r26 unscreened opening and native silent ending exclude earlier cohorts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261124_r26");
-  assert.equal(cohort.startedAt, "2026-11-24T12:32:44.718Z");
-  for (const versionId of ["agtvrsn_0901m86ra5erfe0vc79g474s6k9p", "agtvrsn_2401m86ra8jzfevacyr1rb0581fk"]) {
+test("r27 excludes earlier cohorts including r26", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261125_r27");
+  assert.equal(cohort.startedAt, "2026-11-25T13:21:56.171Z");
+  for (const versionId of ["agtvrsn_0901m86ra5erfe0vc79g474s6k9p", "agtvrsn_2401m86ra8jzfevacyr1rb0581fk",
+    "agtvrsn_6001m86rnxehf518mvew9ag9cpzd", "agtvrsn_8901m86rp00wff4a7rd97dfr2ca7"]) {
     assert.equal(uniformComparisonArm({...eligible(),versionId}),null);
   }
   for (const versionId of ["agtvrsn_1901m7zh4kb1fd6asznabt3ke0e0", "agtvrsn_9901m7zh4nb1ef1ay4aemtcgcvhe", "agtvrsn_7201m7zd5jzre2ea8ryvzrzvw31d", "agtvrsn_6501m7zd5n8mee5bjwfznztwt8h9","agtvrsn_2301m7rsddpefbztdt2w86wfj32k", "agtvrsn_9801m7rsdfvhfszap43vvavg4j0y",

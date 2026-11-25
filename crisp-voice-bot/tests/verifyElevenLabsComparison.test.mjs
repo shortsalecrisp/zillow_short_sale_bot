@@ -22,6 +22,18 @@ function newShape(agent) {
 const expected = { ...R8_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
 const allocation = () => ({ meta: { total: 2 }, results: R8_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
 
+test('approved provider defaults are scoped to their exact fields and values', () => {
+  const settings = {widget:{layout:'default',text_contents:{resume_call:null, end_chat:'Configured', unrelated:null}}};
+  assert.deepEqual(validator.comparisonPlatformSettings(settings),
+    {widget:{text_contents:{end_chat:'Configured', unrelated:null}}});
+  assert.equal(settings.widget.text_contents.resume_call, null);
+  assert.deepEqual(validator.comparisonPlatformSettings({widget:{layout:'compact'}}), {widget:{layout:'compact'}});
+  assert.deepEqual(validator.comparisonAvailabilityTool({api_schema:{mtls_on_token_request:false, timeout:20}}),
+    {api_schema:{timeout:20}});
+  assert.deepEqual(validator.comparisonAvailabilityTool({api_schema:{mtls_on_token_request:true}}),
+    {api_schema:{mtls_on_token_request:true}});
+});
+
 test('only the exact direct workflow analysis response default is reconciled', () => {
   const fresh=fixture();fresh.workflow.analysis_settings={enabled:true,strict:false,ignore:{}};
   const before=JSON.stringify(fresh);

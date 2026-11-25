@@ -202,14 +202,14 @@ export function extractInformationRequestEmail(conversation: ElevenLabsConversat
   return "";
 }
 
-function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
+export function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
   if (!hasClearLiveTransferConsent(conversation.transcript ?? [], conversation.analysis?.transcript_summary ?? "")) {
     return false;
   }
 
   return (conversation.transcript ?? []).some((item) =>
     (item.tool_results ?? []).some((toolResult) => {
-      if (toolResult.tool_name !== "transfer_to_number") {
+      if (toolResult.tool_name !== "transfer_to_number" || toolResult.is_error) {
         return false;
       }
 
@@ -217,7 +217,12 @@ function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
         return true;
       }
 
-      return typeof toolResult.result_value === "string" && toolResult.result_value.includes('"status":"success"');
+      if (typeof toolResult.result_value !== "string") return false;
+      try {
+        return JSON.parse(toolResult.result_value)?.status === "success";
+      } catch {
+        return false;
+      }
     }),
   );
 }
@@ -341,6 +346,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
 
   if (callResult === "no_response_second_attempt") {
     return "No response after second call";
+  }
+
+  if (callResult === "repeated_ivr_review") {
+    return "Repeated automated phone menu - voice retry held";
   }
 
   if (callResult === "agent_not_available") {
@@ -1297,7 +1306,8 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     for (const next of messages.slice(index + 1)) {
       if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
       if (next.role !== "user" || !liveMessages.has(next.message)) return false;
-      const answer = normalizeText(next.message).replace(/^(?:(?:uh+|oh|n-)[, ]*)/, "");
+      const answer = normalizeText(next.message).replace(/^(?:(?:u[hm]+|oh|n-)[, ]*)/, "");
+      if (/^(?:no|nope)[, ]+(?:i think )?(?:we're|we are) (?:good|all set|fine)[.!? ]*$/.test(answer)) return true;
       if (/^(?:no[, ]+)?(?:we're|we are) all good(?: on (?:it|this|that|the file))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer)) return true;
       if (helpQuestion && /^(?:no|nope)[,; ]+(?:(?:a|an|the) )?(?:(?:signed|purchase) )?(?:contract|offer|buyer) would be (?:useful|helpful)(?:[,.! ]+(?:thanks|thank you))?[.! ]*$/.test(answer)) return true;
       return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:['’]m| am) (?:(?:doing|handling) (?:everything|it|this|the file)|okay|ok|good|fine|all set)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
@@ -1518,6 +1528,7 @@ export type AuthoritativeTerminalCallResult =
   | "gatekeeper_admin_early_exit"
   | "apparent_human_early_exit"
   | "agent_not_available"
+  | "repeated_ivr_review"
   | "wrong_contact"
   | "call_end_requested"
   | "answered_not_interested";
@@ -1556,6 +1567,16 @@ export function getAuthoritativeTerminalCallResult(
     !/\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(item.message ?? ""));
   const unresolvedPhoneMenu = phoneMenuIndexes.length > 0 && !explicitLivePickupAfterMenu &&
     (isRecordingOrScreeningArtifact(conversation.transcript ?? []) || phoneMenuIndexes.length >= 2);
+  if (unresolvedPhoneMenu && phoneMenuIndexes.length >= 2 &&
+      !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
+    const menuTurns = phoneMenuIndexes.map(index =>
+      normalizeText(callerTurns[index].message ?? "").replace(/[^a-z0-9]/g, ""));
+    const substantiveTurns = callerTurns.filter(turn => /[a-z0-9]/i.test(turn.message ?? "")).length;
+    if (new Set(menuTurns).size === 1 && substantiveTurns === phoneMenuIndexes.length &&
+        !(conversation.transcript ?? []).some(turn => turn.role !== "user" && /[a-z0-9]/i.test(turn.message ?? ""))) {
+      return "repeated_ivr_review";
+    }
+  }
   if ((unresolvedPhoneMenu || hasTerminalNonleadPlayback(conversation)) && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
     return "agent_not_available";
   }
@@ -2615,7 +2636,8 @@ async function processPostCallOutcomeForConversationUnlocked(
     return true;
   }
 
-  if (terminalCallResult) {
+  const transferCompleted = hasSuccessfulTransfer(conversation);
+  if (terminalCallResult && (terminalCallResult === "do_not_call" || !transferCompleted)) {
     if (conversation.status !== "done" && conversation.status !== "failed") return false;
     const outcome = buildVoiceResponseStatus(terminalCallResult, undefined, metadata.assistantName);
     const terminalUpdate = terminalCallResult === "call_end_requested"
@@ -2651,6 +2673,24 @@ async function processPostCallOutcomeForConversationUnlocked(
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: terminalCallResult,
     });
+    return true;
+  }
+
+  if (transferCompleted) {
+    if (conversation.status !== "done") return false;
+    const outcome = buildVoiceResponseStatus("warm_transfer_completed");
+    await persistSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "warm_transfer_completed",
+      responseStatus: outcome,
+      leadStatusCode: "G",
+      liveTransferRequested: "yes",
+      liveTransferCompleted: "yes",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+    await sendTranscriptEmailIfEnabled({ conversationId, metadata, outcome, summary, transcript: fullTranscript });
+    processedConversationIds.add(conversationId);
     return true;
   }
 
@@ -3063,37 +3103,6 @@ async function processPostCallOutcomeForConversationUnlocked(
     logger.info("ElevenLabs post-call fallback reconciled not-interested tool with caller evidence", {
       conversationId,
       rowNumber: metadata.rowNumber,
-    });
-    return true;
-  }
-
-  if (hasSuccessfulTransfer(conversation)) {
-    const outcome = buildVoiceResponseStatus("warm_transfer_completed");
-
-    await persistSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "warm_transfer_completed",
-      responseStatus: outcome,
-      leadStatusCode: "G",
-      liveTransferRequested: "yes",
-      liveTransferCompleted: "yes",
-      voiceNotes: buildPerformanceNotes(outcome),
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback recorded successful warm transfer", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
     });
     return true;
   }

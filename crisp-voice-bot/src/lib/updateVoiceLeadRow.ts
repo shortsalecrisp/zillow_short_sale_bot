@@ -206,6 +206,10 @@ export function buildVoiceLeadRowWrites(
     addWrite(writes, updates.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT, "callResult", target.callResult);
     addWrite(writes, VOICE_BOT_COL_RESPONSE_STATUS, "responseStatus", updates.responseStatus);
     addWrite(writes, VOICE_BOT_COL_LEAD_STATUS_CODE, "leadStatusCode", target.leadStatusCode);
+    if (verifiedDisposition === "verified_completed_transfer") {
+      addWrite(writes, VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, "liveTransferRequested", "yes");
+      addWrite(writes, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED, "liveTransferCompleted", "yes");
+    }
     for (const column of [VOICE_BOT_COL_CALL_ELIGIBLE, VOICE_BOT_COL_CALL_TIME_BUCKET, VOICE_BOT_COL_CALL_SCHEDULED_FOR]) clearWrite(writes, column, "reviewed_cold_cadence_closed");
     appendVoiceNotesWrite(writes, rowValues, `${updates.voiceNotes ?? ""}\nCODEX_VOICE_CLASSIFICATION_RECONCILED_V1 ${JSON.stringify({
       conversationId: updates.voiceTerminalReceipt.conversationId, callAttemptNumber: updates.callAttemptNumber,
@@ -381,12 +385,20 @@ async function writeVoiceLeadRow(
     if (ivrReconciliation) verifyUnresolvedIvrFirstAttemptReceipt(receipt);
     rowValues = fresh;
     terminalReceiptVerified = true;
-    const provisionalDecline = !updates.voiceReviewedDisposition && updates.callResult === "answered_not_interested" &&
-      !String(fresh[10] ?? "").trim() && String(fresh[updates.callAttemptNumber === 2 ? 40 : 33] ?? "") === "contact_request_review";
-    if (updates.voiceReviewedDisposition || provisionalDecline) {
+    const priorResult = String(fresh[updates.callAttemptNumber === 2 ? 40 : 33] ?? "");
+    const leadStatus = String(fresh[10] ?? "").trim();
+    const automaticDisposition =
+      priorResult === "contact_request_review" && !leadStatus
+        ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
+          : updates.callResult === "answered_not_interested" ? "verified_final_decline" : undefined
+        : priorResult === "interested_followup_review" && leadStatus === "Y"
+          ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
+            : updates.callResult === "warm_transfer_completed" ? "verified_completed_transfer" : undefined
+          : undefined;
+    const reason = updates.voiceReviewedDisposition ?? automaticDisposition;
+    if (reason && !updates.voiceReceiptOnly) {
       if (updates.voiceReviewedDisposition && !updates.voiceExpectedStateHash) throw new Error("Reviewed disposition requires fresh owning state");
       if ((await getInboundQuietGate(sheets, String(fresh[2] ?? ""), now)).blocked) throw new Error("Reviewed disposition held: inbound preference pending");
-      const reason = updates.voiceReviewedDisposition ?? "verified_final_decline";
       try {
         const target = await verifyReviewedDisposition(fresh, Number(updates.callAttemptNumber), reason, receipt);
         if (reason === "verified_caller_goodbye" || reason === "verified_terminal_voicemail_menu") {

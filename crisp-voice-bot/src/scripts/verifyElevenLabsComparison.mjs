@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const R8_COMPARISON = {
+export const R26_COMPARISON = {
   cohort: 'maya_uniform_lead_conversion_20261124_r26',
   startedAt: '2026-11-24T12:32:44.718Z',
   agentId: 'agent_9901kpkhs1cmfgj8w9vm199nc92j',
@@ -17,12 +17,41 @@ export const R8_COMPARISON = {
   ],
 };
 
+// Retain the verifier's existing export name for current-release callers.
+export const R8_COMPARISON = {
+  ...R26_COMPARISON,
+  cohort: 'maya_uniform_lead_conversion_20261125_r27',
+  startedAt: '2026-11-25T13:21:56.171Z',
+  sharedHash: '5e7b752152604f67cc73ef24eb9139f28de427df2f3d4ad4189a6c30ad963a3a',
+  workflowHash: '4dfec36e867bd7f6e8dd7101ef72808022359bbecd6f2b8409adbfb5e82d61d8',
+  arms: [
+    { ...R26_COMPARISON.arms[0], versionId: 'agtvrsn_5101m89dxaghfw6aga5291nqb6p2' },
+    { ...R26_COMPARISON.arms[1], versionId: 'agtvrsn_6201m89dxdx1fzmrx63d4h2jt472' },
+  ],
+};
+
 export const canonical = value => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up some noise in the background. Could you move somewhere quieter?";
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const approvedNullWidgetLabels = [
+  'resume_call', 'end_chat', 'expand_widget', 'collapse_widget', 'dismiss', 'open_chat',
+  'end_chat_confirmation_title', 'end_chat_confirmation_description',
+  'end_call_confirmation_title', 'end_call_confirmation_description',
+  'end_call_confirm', 'cancel_end_confirmation', 'reconnecting_status',
+  'voice_mode_label', 'text_mode_label', 'thinking_status', 'carousel_previous',
+  'carousel_next', 'new_message', 'new_messages',
+];
+
+export function comparisonAvailabilityTool(config) {
+  const result = structuredClone(config);
+  if (isObject(result?.api_schema) && result.api_schema.mtls_on_token_request === false) {
+    delete result.api_schema.mtls_on_token_request;
+  }
+  return result;
+}
 
 // Historical r22 only: later cohorts explicitly pin these fields and must retain them.
 export function comparisonBodyR22(agent) {
@@ -39,6 +68,13 @@ export function comparisonBodyR22(agent) {
 
 export function comparisonPlatformSettings(settings) {
   const result = structuredClone(settings);
+  if (isObject(result?.widget) && result.widget.layout === 'default') delete result.widget.layout;
+  const labels = result?.widget?.text_contents;
+  if (isObject(labels)) {
+    for (const key of approvedNullWidgetLabels) {
+      if (Object.hasOwn(labels, key) && labels[key] === null) delete labels[key];
+    }
+  }
   const reports = isObject(result) && Object.hasOwn(result, 'bi_reports') ? result.bi_reports : undefined;
   if (isObject(reports) && Object.keys(reports).length === 1 && Object.hasOwn(reports, 'enabled')
       && reports.enabled === null) delete result.bi_reports;
@@ -179,11 +215,12 @@ export async function verifyLiveTransferAudio({ apiKey, expected = R8_COMPARISON
   assert.ok(r.ok, `Availability audio read failed HTTP ${r.status}`);
   const t = await r.json(), c = t.tool_config;
   assert.equal(t.id, expected.availabilityToolId, 'Availability audio identity mismatch');
-  assert.equal(digest(c), expected.availabilityToolHash, 'Availability audio config drifted');
+  const configHash = digest(comparisonAvailabilityTool(c));
+  assert.equal(configHash, expected.availabilityToolHash, 'Availability audio config drifted');
   assert.equal(c.name, 'live_transfer_requested'); assert.equal(c.tool_call_sound, expected.sound);
   assert.equal(c.tool_call_sound_behavior, 'always'); assert.equal(c.interruption_mode, 'allow');
   assert.equal(c.disable_interruptions, false); assert.equal(c.response_timeout_secs, 60);
-  return { ok: true, readOnly: true, toolId: t.id, configHash: digest(c), sound: c.tool_call_sound,
+  return { ok: true, readOnly: true, toolId: t.id, configHash, sound: c.tool_call_sound,
     behavior: 'always', interruptible: true, responseTimeoutSeconds: 60, audioPlaybackVerified: false };
 }
 

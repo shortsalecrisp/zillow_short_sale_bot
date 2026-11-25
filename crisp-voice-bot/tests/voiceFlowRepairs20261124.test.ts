@@ -37,3 +37,13 @@ test("a contract would be useful is a scoped negative needs answer, not a generi
  const recording=receipt([user("This is a recorded greeting: No, a contract would be useful. Please leave your message after the beep.")]);
  assert.equal(shouldTreatAsNotInterested(recording),false);
 });
+test("explicit soft decline and repeated automated menu require separate final outcomes", async () => {
+ const {getAuthoritativeTerminalCallResult} = await import("../src/lib/elevenLabsPostCall");
+ const decline = receipt([user("Hi, this is Angie."), agent("Is this your listing?"), user("Yes, it is."),
+   agent("Would help with lender paperwork or calls be useful for this listing?"),
+   user("Um, no, I think we're good."), agent("Understood. Thanks for letting me know.")]);
+ assert.equal(getAuthoritativeTerminalCallResult(decline, 1, {firstName:"Angie"}), "answered_not_interested");
+ const menu = user("For agent support, press two. For accounting, dial three.");
+ assert.equal(getAuthoritativeTerminalCallResult(receipt([menu, menu]), 1, {}), "repeated_ivr_review");
+ assert.notEqual(getAuthoritativeTerminalCallResult(receipt([menu, menu, user("This is Angie.")]), 1, {}), "repeated_ivr_review");
+});

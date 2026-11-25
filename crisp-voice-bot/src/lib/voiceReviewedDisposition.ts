@@ -1,7 +1,7 @@
 import { normalizeMarker, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 
-export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper" | "verified_terminal_voicemail_menu";
+export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_final_opt_out" | "verified_completed_transfer" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper" | "verified_terminal_voicemail_menu";
 
 export function reviewedDispositionState(row: unknown[], attempt: number, reason: ReviewedVoiceDisposition) {
   const marked = (v: unknown) => !["", "no", "false", "0"].includes(normalizeMarker(v));
@@ -22,6 +22,13 @@ export function reviewedDispositionState(row: unknown[], attempt: number, reason
   }
   if (reason === "verified_final_decline" && result === "contact_request_review" && !K) {
     return { callResult: "answered_not_interested", leadStatusCode: "R" };
+  }
+  if (reason === "verified_final_opt_out" &&
+      ((result === "contact_request_review" && !K) || (result === "interested_followup_review" && K === "Y"))) {
+    return { callResult: "do_not_call", leadStatusCode: "R" };
+  }
+  if (reason === "verified_completed_transfer" && result === "interested_followup_review" && K === "Y") {
+    return { callResult: "warm_transfer_completed", leadStatusCode: "G" };
   }
   if (reason === "verified_positive_needs" && attempt === 1 && result === "call_received_agent_hung_up" && K === "N") {
     return { callResult: "interested_followup_review", leadStatusCode: "Y" };
@@ -44,11 +51,14 @@ export async function verifyReviewedDisposition(row: unknown[], attempt: number,
     const { hasTerminalVoicemailManagementMenu } = await import("./elevenLabsRecordingState");
     if (!hasTerminalVoicemailManagementMenu(conversation.transcript ?? [])) throw new Error("Reviewed voicemail requires an exact terminal management menu");
   }
-  const actual = reason === "verified_positive_needs"
+  const actual = reason === "verified_completed_transfer"
+    ? (conversation.status === "done" && classifier.hasSuccessfulTransfer(conversation) ? "warm_transfer_completed" : undefined)
+    : reason === "verified_positive_needs"
     ? classifier.getVoiceContactRequestResult(conversation)
     : classifier.getAuthoritativeTerminalCallResult(conversation, attempt,
       { firstName: normalizeString(row[0]), lastName: normalizeString(row[1]), email: normalizeString(row[3]) });
-  if (actual !== target.callResult || classifier.shouldTreatAsDoNotCall(conversation) ||
+  if (actual !== target.callResult ||
+      (reason !== "verified_final_opt_out" && classifier.shouldTreatAsDoNotCall(conversation)) ||
       classifier.getExplicitCallbackConsent(conversation) ||
       (reason === "verified_historical_gatekeeper" && classifier.getVoiceContactRequestResult(conversation))) {
     throw new Error("Reviewed disposition final receipt does not prove the requested classification");

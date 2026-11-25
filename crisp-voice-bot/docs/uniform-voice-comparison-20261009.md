@@ -1,6 +1,24 @@
 # Uniform Conversion Comparison
 
-Current revision is r26, independently read back at 2026-11-24T12:32:44.718Z. Earlier releases remain historical and are never pooled.
+Current revision is r27, independently read back at 2026-11-25T13:21:56.171Z. Earlier releases remain historical and are never pooled.
+
+## Approved Revision 27: Opening, Terminal Screening, and Repeated Menus
+
+The first unscreened greeting requires the full identity and company opening even after a skipped turn.
+A completed second-attempt screener invitation for an additional message and a repeated automated
+phone menu with no live caller use the existing silent ending. Normal mailboxes and real holds retain
+their existing paths. A repeated unresolved menu is held for review rather than re-enqueued.
+
+- Flash: `agtvrsn_5101m89dxaghfw6aga5291nqb6p2`, eleven_flash_v2, 50%.
+- v4: `agtvrsn_6201m89dxdx1fzmrx63d4h2jt472`, eleven_v4_turbo, 50%.
+- Shared: `5e7b752152604f67cc73ef24eb9139f28de427df2f3d4ad4189a6c30ad963a3a`.
+- Workflow: `4dfec36e867bd7f6e8dd7101ef72808022359bbecd6f2b8409adbfb5e82d61d8`.
+
+November 25 readback approval covers only the 20 enumerated null widget labels,
+`platform_settings.widget.layout = "default"`, and the shared availability tool's
+`api_schema.mtls_on_token_request = false`. Both r26 arms were verified against the historical
+release snapshot with these exact exceptions before the r27 publisher ran. Review historical
+r26 candidate receipts separately using their original versions and the exact final-receipt gate.
 
 ## Approved Revision 26: Opening And Native Silent Ending
 
