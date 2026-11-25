@@ -524,6 +524,18 @@ def test_open_call_time_plus_fee_answers_both_and_creates_unscheduled_handoff(ch
     assert chatbot.row()["callback_requested"] == "no"
 
 
+def test_fha_fee_callback_answers_business_details_without_a_program_claim(chatbot):
+    result = chatbot.receive(
+        "I'm up for a call tomorrow morning after 10. Please some same your website, your business "
+        "name, and instructions on how you get paid. Also, with an FHA. It has to be a set price, not a percentage."
+    )
+    for phrase in ("Crisp Short Sales", "$5,000", "buyer at closing", "crispshortsales.com", "review the FHA/HUD"):
+        assert phrase in result["reply_text"]
+    assert "no extra money" not in result["reply_text"]
+    assert result["handoff_type"] == "HOT LEAD - FEE AND CALL INTEREST"
+    assert "tomorrow morning after 10" in result["callback_time"].lower()
+
+
 def test_deal_numbers_are_not_performance_stats_without_a_metric_question(chatbot):
     ordinary = "The title company gave me your numbers. If the numbers work out, I'll reach out."
     assert chatbot.module._sms_is_unsupported_performance_stats_question(ordinary) is False

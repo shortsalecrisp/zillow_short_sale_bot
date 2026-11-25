@@ -515,6 +515,15 @@ test('open call-time plus fee question answers both and creates an unscheduled o
   assert.equal(h.state.callback_requested, 'no');
 });
 
+test('FHA fee plus a callback keeps timing and answers business details without a program claim', () => {
+  const {h, r} = answer("I'm up for a call tomorrow morning after 10. Please some same your website, your business name, and instructions on how you get paid. Also, with an FHA. It has to be a set price, not a percentage.");
+  assert.equal(r.should_reply, true);
+  assert.match(r.reply_text, /Crisp Short Sales.*\$5,000.*buyer at closing.*crispshortsales\.com.*review the FHA\/HUD/);
+  assert.doesNotMatch(r.reply_text, /no extra money|ensure approval/i);
+  assert.equal(h.effects[0].reason, 'HOT LEAD - FEE AND CALL INTEREST');
+  assert.match(h.state.callback_time, /tomorrow morning after 10/i);
+});
+
 test('ordinary deal numbers are not an unsupported performance-stats question', () => {
   const h = smsHarness();
   const ordinary = "The title company gave me your numbers. If the numbers work out, I'll reach out.";

@@ -6852,6 +6852,7 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|phone|ring)\s+you\b",
         r"\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b",
         r"\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b",
+        r"\b(?:i['’]?m|i am|we['’]?re|we are)\s+up for (?:a )?(?:call|chat)\b",
         r"\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
@@ -7861,6 +7862,29 @@ def _sms_question_priority_decision(
         return _sms_decision(
             handoff_needed=True, block_reply=True, handoff_type="FEE NEGOTIATION",
             reason="Agent proposed or requested a pricing concession",
+        )
+
+    open_call_time = _sms_is_open_call_time_question(text)
+    requests_call = _sms_is_phone_call_interest(text) or _sms_is_scheduled_callback(text)
+    if (
+        re.search(r"\b(?:fha|hud)\b", text)
+        and (_sms_is_fee_question(text) or re.search(r"\bhow you get paid\b", text))
+        and (requests_call or open_call_time)
+    ):
+        reply = ("I'm with Crisp Short Sales. My standard fee is a flat $5,000, "
+                 "paid by the buyer at closing only if the sale closes.")
+        if re.search(r"\b(?:website|reviews|testimonials?)\b", text):
+            reply += " My website is https://www.crispshortsales.com."
+        reply += " I can review the FHA/HUD requirements for this file with you on the call."
+        if open_call_time:
+            reply += " I'd be happy to talk. What time works best for you?"
+        callback = "" if open_call_time else _sms_complete_callback_reference(inbound_text, received_at)
+        return _sms_decision(
+            reply_text=reply, lead_status="Y", handoff_needed=True, send_reply_before_handoff=True,
+            handoff_type="HOT LEAD - FEE AND CALL INTEREST", response_id="fee_specific",
+            call_booking_status="scheduled_callback" if callback else "interested_no_call",
+            callback_time=callback, clear_callback=open_call_time,
+            reason="Answered standard fee and routed file-specific loan requirements",
         )
 
     buyer_concern = _sms_is_buyer_cost_concern(text)

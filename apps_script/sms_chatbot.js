@@ -2911,6 +2911,18 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     return existingClient;
   }
 
+  if (/\b(?:fha|hud)\b/.test(t) &&
+      (isPaymentOrFeeQuestionSignal_(t) || /\bhow you get paid\b/.test(t)) &&
+      (isPhoneCallInterestSignal_(t) || isSchedulingSignal_(t) || isOpenCallTimeQuestionSignal_(t))) {
+    const reply = "I'm with Crisp Short Sales. My standard fee is a flat $5,000, paid by the buyer at closing only if the sale closes." +
+      (isWebsiteReviewsRequestSignal_(t) ? " My website is https://www.crispshortsales.com." : "") +
+      " I can review the FHA/HUD requirements for this file with you on the call.";
+    const decision = withNewCallHandoff_({matched: true, reply_text: reply, lead_status: "Y",
+      conversation_done: false, block_reply: false, reason: "Answered standard fee and routed file-specific loan requirements"}, t, receivedAt);
+    decision.handoff_type = "HOT LEAD - FEE AND CALL INTEREST";
+    return decision;
+  }
+
   const speedQuestion = isSpeedQuestionSignal_(t);
   const flags = {
     speed: speedQuestion,
