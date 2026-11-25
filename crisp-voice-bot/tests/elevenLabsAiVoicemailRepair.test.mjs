@@ -11,7 +11,8 @@ import {applyAiVoicemailRepair,aiVoicemailProtectedHashes,AI_STATUS_OLD,AI_STATU
 import {OLD_ATTEMPT,NEW_ATTEMPT,OLD_MESSAGE,NEW_MESSAGE,OLD_DELIVERY,NEW_DELIVERY} from '../src/scripts/elevenLabsSilentRecordingExit.mjs';
 import {AI_DISCLOSURE_OLD,AI_DISCLOSURE_NEW} from '../src/scripts/elevenLabsMultilingualAiDisclosure.mjs';
 import {restoreR24Prompt} from '../src/scripts/elevenLabsLiveFlowRepair.mjs';
-const prompt=restoreR24Prompt(extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8'))).replace(AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD).replace(NEW_ATTEMPT,OLD_ATTEMPT).replace(NEW_MESSAGE,OLD_MESSAGE).replace(NEW_DELIVERY,OLD_DELIVERY);
+import {restoreR26Opening} from '../src/scripts/elevenLabsOpeningAndMenuRepair.mjs';
+const prompt=restoreR24Prompt(restoreR26Opening(extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8')))).replace(AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD).replace(NEW_ATTEMPT,OLD_ATTEMPT).replace(NEW_MESSAGE,OLD_MESSAGE).replace(NEW_DELIVERY,OLD_DELIVERY);
 const old=prompt.replace(AI_STATUS_NEW,AI_STATUS_OLD).replace(SECOND_ATTEMPT_NEW,SECOND_ATTEMPT_OLD);
 function fixture(i=0){
   const edges={},nodes={recorded_no_voicemail_exit:{type:'end',edge_order:[],return_when_nested:true}};

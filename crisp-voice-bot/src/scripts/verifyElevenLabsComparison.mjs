@@ -20,13 +20,13 @@ export const R26_COMPARISON = {
 // Retain the verifier's existing export name for current-release callers.
 export const R8_COMPARISON = {
   ...R26_COMPARISON,
-  cohort: 'maya_uniform_lead_conversion_20261125_r27',
-  startedAt: '2026-11-25T13:21:56.171Z',
-  sharedHash: '5e7b752152604f67cc73ef24eb9139f28de427df2f3d4ad4189a6c30ad963a3a',
-  workflowHash: '4dfec36e867bd7f6e8dd7101ef72808022359bbecd6f2b8409adbfb5e82d61d8',
+  cohort: 'maya_uniform_lead_conversion_20261125_r28',
+  startedAt: '2026-11-25T13:27:50.274Z',
+  sharedHash: '589bcded16b57433a442cd0ab5caaeda0e7786c00f7288cbe7b774295d9d301c',
+  workflowHash: '7267d6f9a5cb7321486d349f81ee5040dbb409d59baa5832076d1b2ce0b12a74',
   arms: [
-    { ...R26_COMPARISON.arms[0], versionId: 'agtvrsn_5101m89dxaghfw6aga5291nqb6p2' },
-    { ...R26_COMPARISON.arms[1], versionId: 'agtvrsn_6201m89dxdx1fzmrx63d4h2jt472' },
+    { ...R26_COMPARISON.arms[0], versionId: 'agtvrsn_5901m89e84k7f28rmq7bqzwshx2q' },
+    { ...R26_COMPARISON.arms[1], versionId: 'agtvrsn_1301m89e87r0expr4tenxnxjqngj' },
   ],
 };
 

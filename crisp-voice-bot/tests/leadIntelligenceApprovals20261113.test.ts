@@ -34,7 +34,7 @@ test("self-identified target after screening gets only the short listing questio
   assert.match(prompt, /Only AFTER that announcement: a matching spoken/);
   assert.match(prompt, /Do not repeat the full opener after screening/);
   assert.match(prompt, /an unnamed or differently named new listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
-  assert.match(prompt, /Names, repeated hellos or skipped silence never prove delivered identity/);
+  assert.match(prompt, /Silence or skip_turn never proves identity or screening/);
 });
 
 test("named target after screening outranks gatekeeper persistence", async () => {

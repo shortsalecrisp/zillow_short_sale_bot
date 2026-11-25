@@ -14,11 +14,12 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r27 excludes earlier cohorts including r26", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261125_r27");
-  assert.equal(cohort.startedAt, "2026-11-25T13:21:56.171Z");
+test("r28 excludes earlier cohorts including r26 and r27", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261125_r28");
+  assert.equal(cohort.startedAt, "2026-11-25T13:27:50.274Z");
   for (const versionId of ["agtvrsn_0901m86ra5erfe0vc79g474s6k9p", "agtvrsn_2401m86ra8jzfevacyr1rb0581fk",
-    "agtvrsn_6001m86rnxehf518mvew9ag9cpzd", "agtvrsn_8901m86rp00wff4a7rd97dfr2ca7"]) {
+    "agtvrsn_6001m86rnxehf518mvew9ag9cpzd", "agtvrsn_8901m86rp00wff4a7rd97dfr2ca7",
+    "agtvrsn_5101m89dxaghfw6aga5291nqb6p2", "agtvrsn_6201m89dxdx1fzmrx63d4h2jt472"]) {
     assert.equal(uniformComparisonArm({...eligible(),versionId}),null);
   }
   for (const versionId of ["agtvrsn_1901m7zh4kb1fd6asznabt3ke0e0", "agtvrsn_9901m7zh4nb1ef1ay4aemtcgcvhe", "agtvrsn_7201m7zd5jzre2ea8ryvzrzvw31d", "agtvrsn_6501m7zd5n8mee5bjwfznztwt8h9","agtvrsn_2301m7rsddpefbztdt2w86wfj32k", "agtvrsn_9801m7rsdfvhfszap43vvavg4j0y",

@@ -1,6 +1,17 @@
 # Uniform Conversion Comparison
 
-Current revision is r27, independently read back at 2026-11-25T13:21:56.171Z. Earlier releases remain historical and are never pooled.
+Current revision is r28, independently read back at 2026-11-25T13:27:50.274Z. Earlier releases remain historical and are never pooled.
+
+## Approved Revision 28: Restore the Prompt Length Limit
+
+Only the first unscreened opening instruction was shortened across the root prompt and two
+workflow prompt copies. The operational r27 screening, hold, IVR and refusal rules still apply.
+The canonical root is 6,294 words and SHA-256 `8b8d58e09f7c55af188845fb524a8cc387456e4c47c7e1d7e941cc8c3e38cb48`.
+
+- Flash: `agtvrsn_5901m89e84k7f28rmq7bqzwshx2q`, eleven_flash_v2, 50%.
+- v4: `agtvrsn_1301m89e87r0expr4tenxnxjqngj`, eleven_v4_turbo, 50%.
+- Shared: `589bcded16b57433a442cd0ab5caaeda0e7786c00f7288cbe7b774295d9d301c`.
+- Workflow: `7267d6f9a5cb7321486d349f81ee5040dbb409d59baa5832076d1b2ce0b12a74`.
 
 ## Approved Revision 27: Opening, Terminal Screening, and Repeated Menus
 
