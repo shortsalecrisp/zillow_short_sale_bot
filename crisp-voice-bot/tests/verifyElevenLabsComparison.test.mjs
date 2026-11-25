@@ -34,6 +34,24 @@ test('approved provider defaults are scoped to their exact fields and values', (
     {api_schema:{mtls_on_token_request:true}});
 });
 
+test('response reconciliation preserves malformed containers, nested copies and every non-default value', () => {
+  for (const value of [null, false, true, 0, 1, '', [], {}, 'configured']) {
+    assert.deepEqual(validator.comparisonPlatformSettings({widget:{layout:value}}), {widget:{layout:value}});
+    assert.deepEqual(validator.comparisonPlatformSettings({widget:{text_contents:{resume_call:value}}}),
+      value === null ? {widget:{text_contents:{}}} : {widget:{text_contents:{resume_call:value}}});
+    assert.deepEqual(validator.comparisonAvailabilityTool({api_schema:{mtls_on_token_request:value}}),
+      value === false ? {api_schema:{}} : {api_schema:{mtls_on_token_request:value}});
+  }
+  for (const value of [null, false, 0, '', []]) {
+    assert.deepEqual(validator.comparisonPlatformSettings({widget:value}), {widget:value});
+    assert.deepEqual(validator.comparisonAvailabilityTool({api_schema:value}), {api_schema:value});
+  }
+  const settings={nested:{widget:{layout:'default',text_contents:{resume_call:null}}},layout:'default'};
+  assert.deepEqual(validator.comparisonPlatformSettings(settings), settings);
+  const tool={nested:{api_schema:{mtls_on_token_request:false}},mtls_on_token_request:false};
+  assert.deepEqual(validator.comparisonAvailabilityTool(tool), tool);
+});
+
 test('only the exact direct workflow analysis response default is reconciled', () => {
   const fresh=fixture();fresh.workflow.analysis_settings={enabled:true,strict:false,ignore:{}};
   const before=JSON.stringify(fresh);

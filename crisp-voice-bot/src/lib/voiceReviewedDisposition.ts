@@ -5,10 +5,15 @@ export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_fina
 
 export function reviewedDispositionState(row: unknown[], attempt: number, reason: ReviewedVoiceDisposition) {
   const marked = (v: unknown) => !["", "no", "false", "0"].includes(normalizeMarker(v));
-  if ([12, 13, 15, 16, 17, 19, 28, 35, 36, 37, 38, 43, 44].some(i => marked(row[i])) ||
+  const owningResultIndex = attempt === 1 ? 33 : 40;
+  const completingTransfer = reason === "verified_completed_transfer" &&
+    ["interested_followup_review", "live_transfer_requested"].includes(normalizeString(row[owningResultIndex]));
+  if ([12, 13, 15, 16, 17, 19, 28, 35, 36, 37, 38, 43, 44].some(i =>
+      !(completingTransfer && i === 35 && normalizeMarker(row[i]) === "yes") && marked(row[i])) ||
       getVoicePhoneAttemptIdentity(row).reviewReason ||
       normalizeString(row[41]).includes("CODEX_VOICE_EXPIRED_TO_MAILSHAKE_V1") ||
-      [row[33], row[40]].some(v => ["do_not_call", "callback_requested", "information_requested", "live_transfer_requested", "live_transfer_completed", "deferred_contact"].includes(normalizeString(v)))) {
+      [33, 40].some(i => !(completingTransfer && i === owningResultIndex && normalizeString(row[i]) === "live_transfer_requested") &&
+        ["do_not_call", "callback_requested", "information_requested", "live_transfer_requested", "live_transfer_completed", "deferred_contact"].includes(normalizeString(row[i])))) {
     throw new Error("Reviewed disposition held: protected contact state");
   }
   const result = normalizeString(row[attempt === 1 ? 33 : 40]), K = normalizeString(row[10]);
@@ -27,7 +32,7 @@ export function reviewedDispositionState(row: unknown[], attempt: number, reason
       ((result === "contact_request_review" && !K) || (result === "interested_followup_review" && K === "Y"))) {
     return { callResult: "do_not_call", leadStatusCode: "R" };
   }
-  if (reason === "verified_completed_transfer" && result === "interested_followup_review" && K === "Y") {
+  if (reason === "verified_completed_transfer" && completingTransfer && ["", "Y", "G"].includes(K)) {
     return { callResult: "warm_transfer_completed", leadStatusCode: "G" };
   }
   if (reason === "verified_positive_needs" && attempt === 1 && result === "call_received_agent_hung_up" && K === "N") {

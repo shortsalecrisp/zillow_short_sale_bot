@@ -284,7 +284,7 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
   }
 
   if (callResult === "warm_transfer_completed") {
-    return "Warm transfer accepted";
+    return "Call transferred to Yoni - owner conversation unverified";
   }
 
   if (callResult === "callback_requested") {

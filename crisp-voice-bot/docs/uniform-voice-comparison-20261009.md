@@ -2,6 +2,26 @@
 
 Current revision is r28, independently read back at 2026-11-25T13:27:50.274Z. Earlier releases remain historical and are never pooled.
 
+## November 25 Backend Receipt Follow-Through
+
+The matched r28 provider versions and boundary above remain unchanged. The backend now
+compacts only repeated explanatory metrics boilerplate before the notes cell reaches its
+limit, preserving structured call evidence; an oversized structured record fails closed
+for archive review rather than clipping an older receipt. A successful final transfer can
+settle its own provisional request flag, but not a callback, completed transfer, opt-out,
+takeover or another attempt's preference. Its display label explicitly leaves the owner's
+conversation unverified. Callback-alert templates, deduplication, schedules, four slots,
+one parallel start, local windows and all provider settings remain unchanged.
+
+All 61 held r26 positive-duration calls were reverified against final branch/version,
+current row/normalized phone/attempt, owning metrics, duplicate identity and local windows:
+Flash 34 and v4 27. Five unaccepted zero-duration failures remain excluded. Kelli row7097's
+first metric was restored from its fresh final receipt; repeated second-call blocks count
+once, and a missing optional voice ID is not a contradictory configured voice. These are
+historical genuine-call counts, not true-live or conversion counts. No calls or messages
+were placed, and playback was not validated. Evidence: the task artifact directory
+`voice-terminal-safeguards-20261125/r26-final-inclusion-ledger.json` and exact Sheet readback.
+
 ## Approved Revision 28: Restore the Prompt Length Limit
 
 Only the first unscreened opening instruction was shortened across the root prompt and two

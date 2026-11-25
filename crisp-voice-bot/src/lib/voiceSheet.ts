@@ -439,6 +439,26 @@ export function trimVoiceBotVoiceNotes(value: string): string {
     return value;
   }
 
+  // Compact repeated instructions before considering prose; keep call evidence intact.
+  const lines = value.split("\n").map(line => {
+    try {
+      const item = JSON.parse(line);
+      if (item?.schema !== "voice_call_metrics_v1") return line;
+      if (typeof item.codexInstructions === "string") delete item.codexInstructions;
+      if (item.abTestScope && !Array.isArray(item.abTestScope) && typeof item.abTestScope.analysisRule === "string") delete item.abTestScope.analysisRule;
+      item.boilerplateCompacted = true;
+      return JSON.stringify(item);
+    } catch { return line; }
+  });
+  const compacted = lines.join("\n");
+  if (compacted.length <= VOICE_BOT_MAX_VOICE_NOTES_CHARS) return compacted;
   const prefix = "[Older voice performance log data trimmed to fit Google Sheets cell limit]\n";
+  const structured = lines.filter(line => line.startsWith("{") || line.includes("CODEX_VOICE_")).join("\n");
+  if (structured) {
+    const available = VOICE_BOT_MAX_VOICE_NOTES_CHARS - prefix.length - structured.length - 1;
+    if (available < 0) throw new Error("Voice notes structured evidence exceeds cell capacity; compact audit required before archive review");
+    const prose = lines.filter(line => !line.startsWith("{") && !line.includes("CODEX_VOICE_")).join("\n");
+    return prefix + structured + "\n" + (available ? prose.slice(-available) : "");
+  }
   return prefix + value.slice(value.length - (VOICE_BOT_MAX_VOICE_NOTES_CHARS - prefix.length));
 }

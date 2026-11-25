@@ -388,12 +388,15 @@ async function writeVoiceLeadRow(
     const priorResult = String(fresh[updates.callAttemptNumber === 2 ? 40 : 33] ?? "");
     const leadStatus = String(fresh[10] ?? "").trim();
     const automaticDisposition =
-      priorResult === "contact_request_review" && !leadStatus
+      updates.callResult === "warm_transfer_completed" &&
+        ["interested_followup_review", "live_transfer_requested"].includes(priorResult) && ["", "Y", "G"].includes(leadStatus)
+        ? "verified_completed_transfer"
+      : priorResult === "contact_request_review" && !leadStatus
         ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
           : updates.callResult === "answered_not_interested" ? "verified_final_decline" : undefined
         : priorResult === "interested_followup_review" && leadStatus === "Y"
           ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
-            : updates.callResult === "warm_transfer_completed" ? "verified_completed_transfer" : undefined
+            : undefined
           : undefined;
     const reason = updates.voiceReviewedDisposition ?? automaticDisposition;
     if (reason && !updates.voiceReceiptOnly) {

@@ -47,8 +47,9 @@ const approvedNullWidgetLabels = [
 
 export function comparisonAvailabilityTool(config) {
   const result = structuredClone(config);
-  if (isObject(result?.api_schema) && result.api_schema.mtls_on_token_request === false) {
-    delete result.api_schema.mtls_on_token_request;
+  const schema = isObject(result) && Object.hasOwn(result, 'api_schema') ? result.api_schema : undefined;
+  if (isObject(schema) && Object.hasOwn(schema, 'mtls_on_token_request') && schema.mtls_on_token_request === false) {
+    delete schema.mtls_on_token_request;
   }
   return result;
 }
@@ -68,8 +69,9 @@ export function comparisonBodyR22(agent) {
 
 export function comparisonPlatformSettings(settings) {
   const result = structuredClone(settings);
-  if (isObject(result?.widget) && result.widget.layout === 'default') delete result.widget.layout;
-  const labels = result?.widget?.text_contents;
+  const widget = isObject(result) && Object.hasOwn(result, 'widget') ? result.widget : undefined;
+  if (isObject(widget) && Object.hasOwn(widget, 'layout') && widget.layout === 'default') delete widget.layout;
+  const labels = isObject(widget) && Object.hasOwn(widget, 'text_contents') ? widget.text_contents : undefined;
   if (isObject(labels)) {
     for (const key of approvedNullWidgetLabels) {
       if (Object.hasOwn(labels, key) && labels[key] === null) delete labels[key];
