@@ -7,6 +7,11 @@ import {
   ELEVENLABS_TURN_MODEL,
   expectedRuntimeConfig,
   getElevenLabsRuntimeExperimentStatus,
+  ELEVENLABS_TTS_COMPARISON_ENDED_AT,
+  ELEVENLABS_V4_PRODUCTION,
+  ELEVENLABS_UNIFORM_COMPARISON,
+  uniformComparisonArm,
+  v4ProductionReceiptMatched,
 } from "../src/lib/elevenLabsRuntimeExperiment";
 
 function baseline() {
@@ -60,12 +65,31 @@ test("expected branch configs preserve unrelated agent settings", () => {
   assert.equal(expected.tts?.speed, 0.95);
 });
 
-test("runtime status declares a 50/50 Maya/Eryn experiment with turn_v3 on both arms", () => {
+test("runtime declares owner-selected v4-only production and closes the historical experiment", () => {
   const status = getElevenLabsRuntimeExperimentStatus();
-  assert.equal(status.enabled, true);
+  assert.equal(status.enabled, false);
+  assert.equal(status.mode, "v4_production");
   assert.equal(status.commonSettings.publicAssistantName, "Maya");
   assert.equal(status.commonSettings.voiceName, "Eryn");
   assert.equal(status.commonSettings.turnModel, "turn_v3");
-  assert.deepEqual(status.arms.map((arm) => arm.trafficPercent), [50, 50]);
+  assert.deepEqual(status.arms.map((arm) => arm.trafficPercent), [0, 100]);
   assert.deepEqual(status.arms.map((arm) => arm.ttsModel), ["eleven_flash_v2", "eleven_v4_turbo"]);
+});
+
+test("new production calls and the ambiguous cutover second never enter the historical comparison", () => {
+  const input = { finalReceiptMatched: true, testMode: false, durationSecs: 20,
+    startTimeUnixSecs: Math.ceil(Date.parse(ELEVENLABS_UNIFORM_COMPARISON.startedAt) / 1000),
+    branchId: ELEVENLABS_V4_PRODUCTION.branchId, versionId: ELEVENLABS_V4_PRODUCTION.versionId };
+  assert.equal(uniformComparisonArm(input), "v4_turbo_test");
+  assert.equal(v4ProductionReceiptMatched(input), false);
+  input.startTimeUnixSecs = Math.floor(Date.parse(ELEVENLABS_TTS_COMPARISON_ENDED_AT) / 1000);
+  assert.equal(uniformComparisonArm(input), null);
+  assert.equal(v4ProductionReceiptMatched(input), false);
+  input.startTimeUnixSecs = Math.ceil(Date.parse(ELEVENLABS_V4_PRODUCTION.startedAt) / 1000);
+  assert.equal(uniformComparisonArm(input), null);
+  assert.equal(v4ProductionReceiptMatched(input), true);
+  for (const edit of [{ testMode: true }, { finalReceiptMatched: false }, { versionId: 'unknown' },
+    { branchId: 'unknown' }, { durationSecs: 0 }, { durationSecs: Number.NaN }, { startTimeUnixSecs: null }]) {
+    assert.equal(v4ProductionReceiptMatched({ ...input, ...edit }), false);
+  }
 });

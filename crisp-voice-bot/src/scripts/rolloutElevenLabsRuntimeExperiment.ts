@@ -10,6 +10,7 @@ import {
   ELEVENLABS_TTS_TEST_MODEL,
   ELEVENLABS_TURN_MODEL,
   expectedRuntimeConfig,
+  ELEVENLABS_V4_PRODUCTION,
 } from "../lib/elevenLabsRuntimeExperiment";
 
 const canonical = (value: any): any => {
@@ -77,6 +78,9 @@ function assertRuntimeConfig(agent: AgentResponse, expected: Record<string, any>
 }
 
 async function main(): Promise<void> {
+  if (ELEVENLABS_V4_PRODUCTION.trafficPercent === 100) {
+    throw new Error("The owner retired the 50/50 rollout. A separately approved allocation release is required to reopen it.");
+  }
   const { config } = await import("../lib/config");
   const { apiKey, agentId, branchId: mainBranchId } = config.elevenLabs;
   if (!apiKey || !agentId || !mainBranchId) {

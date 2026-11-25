@@ -14,7 +14,10 @@ import {
   ELEVENLABS_TTS_TEST_MODEL,
   ELEVENLABS_TURN_MODEL,
   ELEVENLABS_UNIFORM_COMPARISON,
+  ELEVENLABS_V4_PRODUCTION,
+  ELEVENLABS_TTS_COMPARISON_ENDED_AT,
   uniformComparisonArm,
+  v4ProductionReceiptMatched,
 } from "./elevenLabsRuntimeExperiment";
 
 export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
@@ -547,6 +550,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         "Analyze calls after startedAt once 300-400 additional calls have accumulated. Continue scaling only if there are at least 3 transcript/playback-verified handoff-ready leads or 1 owner-confirmed serious file opportunity.",
     },
     ttsModelExperiment: {
+      enabled: false,
+      endedAt: ELEVENLABS_TTS_COMPARISON_ENDED_AT,
       startedAt: ELEVENLABS_TTS_EXPERIMENT_STARTED_AT,
       uniformComparison: {
         ...ELEVENLABS_UNIFORM_COMPARISON,
@@ -569,7 +574,14 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         },
       },
       analysisRule:
-        "Use providerIdentity.branchId only from a matching final conversation receipt. Compare live answered calls separately from voicemail/no-answer and hold opener, time bucket, and policy strata constant.",
+        "Historical 50/50 experiment closed at endedAt. Its arm percentages are historical only. Never admit later production calls or transition-second calls. Use exact final branch/version receipts; keep script cohorts separate.",
+    },
+    ttsProduction: {
+      ...ELEVENLABS_V4_PRODUCTION,
+      finalReceiptMatched: v4ProductionReceiptMatched({ finalReceiptMatched,
+        testMode: Boolean(input.metadata.testMode || input.metadata.providerProofCall), durationSecs,
+        startTimeUnixSecs: input.conversation.metadata?.start_time_unix_secs,
+        branchId: input.conversation.branch_id, versionId: input.conversation.version_id }),
     },
     call: {
       conversationId: input.conversationId,

@@ -1,6 +1,45 @@
 # Uniform Conversion Comparison
 
-Current revision is r28, independently read back at 2026-11-25T13:27:50.274Z. Earlier releases remain historical and are never pooled.
+Current shared script revision is r28. The owner ended the 50/50 experiment on November 25
+and selected v4 Turbo for all new conversations. This is an owner decision, not a proven
+statistical winner. Earlier releases and the closed comparison remain historical and are never pooled.
+
+## November 25: Owner-Approved V4-Only Production
+
+The allocation-only deployment began at `2026-11-25T17:40:58.101Z` and its independent
+readback completed at `2026-11-25T17:40:58.963Z` (12:40:58 PM America/New_York).
+The r28 comparison is closed at the first timestamp. Production receipt attribution begins
+at the second timestamp; the ambiguous whole cutover second is excluded from both samples.
+In-flight conversations are not restarted or redialed.
+
+- Agent: `agent_9901kpkhs1cmfgj8w9vm199nc92j`.
+- Flash branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`: **0%**, unchanged version
+  `agtvrsn_5901m89e84k7f28rmq7bqzwshx2q` / `eleven_flash_v2`, retained for history.
+- V4 branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`: **100%**, unchanged version
+  `agtvrsn_1301m89e87r0expr4tenxnxjqngj` / `eleven_v4_turbo`.
+- Prompt, workflow, voice, LLM, turn_v3, protected platform/phone/WhatsApp/procedures and
+  audio digests remain exactly r28. No provider configuration PATCH was made.
+- The allocation plan SHA-256 is `ea183e0489f29128455b81439d5586ac586844f4b9eb40bb3bcbe63a20f87406`.
+  The guarded rollout issues only one allocation POST and reconciles an ambiguous response
+  by reading, never by repeating the write. It refuses changed versions or protected state.
+- The canonical CLI now runs `verifyLiveV4Production` (exactly three GETs); independently
+  call `verifyLiveTransferAudio` for the fourth shared-audio GET. The historical exported
+  `verifyLiveComparison` still requires 50/50 and must fail on production allocation.
+- Runtime experiment status is disabled, mode `v4_production`, with explicit 0/100 arms.
+  Metrics keep the historical comparison closed and identify new production calls only
+  from matching final branch/version, positive duration, non-test and provider start evidence.
+- Existing comparison prompt publishers refuse non-50/50 traffic; the legacy initial
+  50/50 rollout is blocked. Do not reuse either to reopen the split or edit active production.
+  Any later prompt release needs a separately reviewed production release and exact readback.
+- Existing callbacks and original hot-lead email template/deduplication, opt-outs, takeover,
+  two-attempt/current-phone protections, owner controls, local weekday windows, four slots,
+  one parallel start, 60-second polling/headroom and monitoring schedule are unchanged.
+- Configuration verification is not organic behavior or acoustic proof. No test calls were placed.
+
+Plan and receipt: the task artifact directory `voice-v4-production-20261125/`.
+The November 25 lifetime review remains a separate historical snapshot, not a final r28 count.
+Rollback requires explicit owner approval and a freshly guarded allocation plan; never
+automatically restore Flash traffic or reset historical counts.
 
 ## November 25 Backend Receipt Follow-Through
 

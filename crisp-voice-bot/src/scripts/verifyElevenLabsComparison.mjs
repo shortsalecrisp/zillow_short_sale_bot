@@ -22,6 +22,7 @@ export const R8_COMPARISON = {
   ...R26_COMPARISON,
   cohort: 'maya_uniform_lead_conversion_20261125_r28',
   startedAt: '2026-11-25T13:27:50.274Z',
+  endedAt: '2026-11-25T17:40:58.101Z',
   sharedHash: '589bcded16b57433a442cd0ab5caaeda0e7786c00f7288cbe7b774295d9d301c',
   workflowHash: '7267d6f9a5cb7321486d349f81ee5040dbb409d59baa5832076d1b2ce0b12a74',
   arms: [
@@ -164,12 +165,21 @@ export function comparisonBody(agent) {
 }
 
 export function validateComparison(agents, allocation, expected = R8_COMPARISON) {
+  return validatePinnedAllocation(agents, allocation, expected, [50, 50]);
+}
+
+export function validateV4Production(agents, allocation, expected = R8_COMPARISON) {
+  return { ...validatePinnedAllocation(agents, allocation, expected, [0, 100]), mode: 'v4_production',
+    productionStartedAt: '2026-11-25T17:40:58.963Z', comparisonEndedAt: '2026-11-25T17:40:58.101Z' };
+}
+
+function validatePinnedAllocation(agents, allocation, expected, percentages) {
   assert.equal(agents.length, 2, 'Exactly two provider readbacks required');
   const results = allocation?.results;
   assert.ok(Array.isArray(results) && allocation.meta?.total === results.length,
     'Complete provider branch allocation required');
   const active = results.filter(branch => !branch.is_archived && branch.current_live_percentage > 0);
-  assert.equal(active.length, 2, 'Exactly two live comparison branches required');
+  assert.equal(active.length, percentages.filter(value => value > 0).length, 'Unexpected live branch allocation');
   const bodies = [];
   const arms = agents.map((agent, index) => {
     const arm = expected.arms[index];
@@ -177,14 +187,15 @@ export function validateComparison(agents, allocation, expected = R8_COMPARISON)
     assert.equal(agent.branch_id, arm.branchId, `${arm.name}: branch mismatch`);
     assert.equal(agent.version_id, arm.versionId, `${arm.name}: unknown version requires fresh review`);
     assert.equal(agent.conversation_config?.tts?.model_id, arm.ttsModel, `${arm.name}: TTS model mismatch`);
-    assert.ok(active.some(branch => branch.id === arm.branchId && branch.current_live_percentage === 50),
-      `${arm.name}: exact 50/50 live traffic required`);
+    assert.ok(results.some(branch => branch.id === arm.branchId && !branch.is_archived
+      && branch.current_live_percentage === percentages[index]),
+      `${arm.name}: exact ${percentages.join('/')} live traffic required`);
     const body = comparisonBody(agent);
     bodies.push(body);
     assert.equal(digest(body), expected.sharedHash, `${arm.name}: shared configuration digest mismatch`);
     assert.equal(digest(body.workflow), expected.workflowHash, `${arm.name}: workflow digest mismatch`);
     return { name: arm.name, branchId: agent.branch_id, versionId: agent.version_id,
-      ttsModel: arm.ttsModel, trafficPercent: 50, sharedHash: digest(body), workflowHash: digest(body.workflow) };
+      ttsModel: arm.ttsModel, trafficPercent: percentages[index], sharedHash: digest(body), workflowHash: digest(body.workflow) };
   });
   assert.deepEqual(canonical(bodies[0]), canonical(bodies[1]), 'Normalized bodies must be directly identical');
   for (const key of ['platform_settings', 'phone_numbers', 'whatsapp_accounts', 'procedures']) {
@@ -197,6 +208,14 @@ export function validateComparison(agents, allocation, expected = R8_COMPARISON)
 }
 
 export async function verifyLiveComparison({ apiKey, expected = R8_COMPARISON }, fetcher = fetch) {
+  return verifyLivePinnedAllocation({ apiKey, expected }, validateComparison, fetcher);
+}
+
+export async function verifyLiveV4Production({ apiKey, expected = R8_COMPARISON }, fetcher = fetch) {
+  return verifyLivePinnedAllocation({ apiKey, expected }, validateV4Production, fetcher);
+}
+
+async function verifyLivePinnedAllocation({ apiKey, expected }, validate, fetcher) {
   assert.ok(apiKey, 'ELEVENLABS_API_KEY is required');
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${expected.agentId}`;
   const get = async url => {
@@ -206,7 +225,7 @@ export async function verifyLiveComparison({ apiKey, expected = R8_COMPARISON },
   };
   const agents = [];
   for (const arm of expected.arms) agents.push(await get(`${endpoint}?branch_id=${encodeURIComponent(arm.branchId)}`));
-  return { ...validateComparison(agents, await get(`${endpoint}/branches`), expected), verifiedAt: new Date().toISOString() };
+  return { ...validate(agents, await get(`${endpoint}/branches`), expected), verifiedAt: new Date().toISOString() };
 }
 
 // Separate from the canonical three-GET arm verifier: shared webhook settings are independent resources.
@@ -231,7 +250,7 @@ if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
     process.stderr.write('This read-only verifier accepts no mutation or cohort-override arguments.\n');
     process.exitCode = 1;
   } else {
-    verifyLiveComparison({ apiKey: process.env.ELEVENLABS_API_KEY })
+    verifyLiveV4Production({ apiKey: process.env.ELEVENLABS_API_KEY })
       .then(result => process.stdout.write(`${JSON.stringify(result)}\n`))
       .catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
   }
