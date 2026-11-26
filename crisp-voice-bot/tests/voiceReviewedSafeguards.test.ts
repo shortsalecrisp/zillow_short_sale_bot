@@ -223,6 +223,12 @@ test("direct reviewed writes independently fetch final proof, persist owning col
   for (const [reason, attempt, oldResult, K, nextResult, nextK, transcript] of [
     ["verified_final_decline", 1, "contact_request_review", "", "answered_not_interested", "R", [
       { role: "agent", message: "Would help with lender paperwork or calls be useful for this listing?" }, { role: "user", message: "No." }]],
+    ["verified_completed_gatekeeper_message", 1, "contact_request_review", "", "gatekeeper_admin_early_exit", "", [
+      { role: "user", message: "Synthetic's phone, this is Jen." },
+      { role: "agent", message: "Hi, Maya with Crisp Short Sales." },
+      { role: "user", message: "I'm her assistant. Could you leave your contact details?" },
+      { role: "agent", message: "Yoni's direct number is four zero four." },
+      { role: "user", message: "I will pass that to Synthetic." }]],
     ["verified_positive_needs", 1, "call_received_agent_hung_up", "N", "interested_followup_review", "Y", [
       { role: "agent", message: "Te seria util apoyo con esos tramites para tu propiedad en Main Street?" }, { role: "user", message: "Si." }]],
     ["verified_caller_goodbye", 2, "no_response_second_attempt", "N", "call_end_requested", "", [{ role: "user", message: "Bye." }]],

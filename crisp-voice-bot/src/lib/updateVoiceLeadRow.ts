@@ -393,7 +393,9 @@ async function writeVoiceLeadRow(
         ? "verified_completed_transfer"
       : priorResult === "contact_request_review" && !leadStatus
         ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
-          : updates.callResult === "answered_not_interested" ? "verified_final_decline" : undefined
+          : updates.callResult === "answered_not_interested" ? "verified_final_decline"
+          : updates.callResult === "gatekeeper_admin_early_exit" ? "verified_completed_gatekeeper_message"
+          : undefined
         : priorResult === "interested_followup_review" && leadStatus === "Y"
           ? updates.callResult === "do_not_call" ? "verified_final_opt_out"
             : undefined

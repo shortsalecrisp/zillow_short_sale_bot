@@ -905,9 +905,14 @@ export function shouldTreatAsRecordedScreenerTerminal(conversation: ElevenLabsCo
   const messages = userMessages(conversation).map(normalizeText);
   const hasScreeningPrompt = messages.some((text) =>
     /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+    isTruncatedRecordedNamePrompt(text) ||
     /\b(?:call assist by google|call screening|screening (?:service|assistant)|please stay on the(?: line)?|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text),
   );
   return hasScreeningPrompt;
+}
+
+function isTruncatedRecordedNamePrompt(text: string): boolean {
+  return /^(?:hi[,. ]+)?if you record your(?: name)?[ .…-]*$/.test(text);
 }
 
 export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): boolean {
@@ -1307,6 +1312,8 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
       if (next.role !== "user" || !liveMessages.has(next.message)) return false;
       const answer = normalizeText(next.message).replace(/^(?:(?:u[hm]+|oh|n-)[, ]*)/, "");
+      if (helpQuestion && /^no[, ]+(?:i|we)(?:'ve| have)? already (?:have |got )?(?:contacts?|a contact) (?:with|at) (?:the |my |our )?(?:bank|lender)\b/.test(answer) &&
+          !/\?|\bbut\b(?! so far\b)|\b(?:call me|call us|call back|can you|could you|would you|i (?:want|need|would like))\b/.test(answer)) return true;
       if (/^(?:no|nope)[, ]+(?:i think )?(?:we're|we are) (?:good|all set|fine)[.!? ]*$/.test(answer)) return true;
       if (/^(?:no[, ]+)?(?:we're|we are) all good(?: on (?:it|this|that|the file))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer)) return true;
       if (helpQuestion && /^(?:no|nope)[,; ]+(?:(?:a|an|the) )?(?:(?:signed|purchase) )?(?:contract|offer|buyer) would be (?:useful|helpful)(?:[,.! ]+(?:thanks|thank you))?[.! ]*$/.test(answer)) return true;
@@ -1595,6 +1602,7 @@ export function getAuthoritativeTerminalCallResult(
   // silence/no-response fallback. Let the contact-outcome path preserve it as
   // interested follow-up without inventing callback or transfer consent.
   if (shouldTreatAsPositiveNeedsAnswer(conversation)) return undefined;
+  if (hasCompletedGatekeeperMessage(conversation)) return "gatekeeper_admin_early_exit";
   if (shouldTreatAsGatekeeperAdminEarlyExit(conversation, expected.firstName) ||
     shouldTreatAsUnrelatedLiveBusiness(conversation, expected.firstName)) return "gatekeeper_admin_early_exit";
   if (shouldTreatAsAgentUnavailable(conversation, expected.firstName)) {
@@ -2171,6 +2179,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
     if (item.role === "user" && typeof item.message === "string") {
       const text = normalizeText(item.message);
       const screeningTurn = /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+        isTruncatedRecordedNamePrompt(text) ||
         /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available|(?:the )?call could not be connected)\b/.test(text);
       if (screeningTurn) {
         sawScreening = true;
@@ -2363,6 +2372,26 @@ export function shouldTreatAsGatekeeperAdminEarlyExit(
   expectedFirstName = "",
 ): boolean {
   return hasLiveHumanGatekeeperEvidence(conversation, expectedFirstName);
+}
+
+export function hasCompletedGatekeeperMessage(conversation: ElevenLabsConversation): boolean {
+  const turns = conversation.transcript ?? [];
+  const request = turns.findIndex(turn => {
+    if (turn.role !== "user" || !turn.message) return false;
+    const text = normalizeText(turn.message);
+    return /\b(?:i am|i'm|this is)\b.{0,25}\b(?:assistant|office admin|receptionist)\b/.test(text) &&
+      /\b(?:leave|give|share|have|take)\b.{0,32}\b(?:contact (?:details|information)|(?:phone|callback) number|your message)\b/.test(text) &&
+      !/\b(?:automated|virtual|ai|at the tone|recorded)\b/.test(text);
+  });
+  if (request < 0) return false;
+  const contact = turns.findIndex((turn, index) => index > request &&
+    (turn.role === "assistant" || turn.role === "agent") && /\b(?:number|contact details)\b/i.test(turn.message ?? "") &&
+    /\b(?:yoni|crisp short sales)\b/i.test(turn.message ?? ""));
+  if (contact < 0) return false;
+  const followup = turns.slice(contact + 1).filter(turn => turn.role === "user" && hasMeaningfulSpokenContent(turn.message ?? ""));
+  const passesMessage = /\b(?:i'll|i will) (?:pass\b.{0,70}\b(?:to|along|on)\b|let\b.{0,40}\bknow\b|relay\b)/i;
+  return followup.some(turn => passesMessage.test(turn.message ?? "")) && followup.every(turn =>
+    passesMessage.test(turn.message ?? "") || /^(?:thank you|thanks|got it|okay|goodbye)[.! ]*$/i.test(turn.message ?? ""));
 }
 
 /** A live human can answer for a completely different business. Treat that
@@ -2649,6 +2678,8 @@ async function processPostCallOutcomeForConversationUnlocked(
             ? { leadStatusCode: "R" } : {}),
           ...(automatedMessageTaker ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "apparent_human_early_exit" ? { leadStatusCode: "N" } : {}),
+          ...(terminalCallResult === "gatekeeper_admin_early_exit" && hasCompletedGatekeeperMessage(conversation) &&
+              metadata.callAttemptNumber === 1 ? { leadStatusCode: "" } : {}),
           ...(isFinalUnansweredVoiceResult(terminalCallResult, metadata.callAttemptNumber)
             ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "voicemail_left" ? { vmLeft: "yes" } : {}),

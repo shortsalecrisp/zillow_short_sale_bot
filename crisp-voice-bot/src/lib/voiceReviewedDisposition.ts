@@ -1,7 +1,7 @@
 import { normalizeMarker, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 
-export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_final_opt_out" | "verified_completed_transfer" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper" | "verified_terminal_voicemail_menu";
+export type ReviewedVoiceDisposition = "verified_final_decline" | "verified_final_opt_out" | "verified_completed_transfer" | "verified_positive_needs" | "verified_caller_goodbye" | "verified_historical_gatekeeper" | "verified_terminal_voicemail_menu" | "verified_completed_gatekeeper_message";
 
 export function reviewedDispositionState(row: unknown[], attempt: number, reason: ReviewedVoiceDisposition) {
   const marked = (v: unknown) => !["", "no", "false", "0"].includes(normalizeMarker(v));
@@ -27,6 +27,9 @@ export function reviewedDispositionState(row: unknown[], attempt: number, reason
   }
   if (reason === "verified_final_decline" && result === "contact_request_review" && !K) {
     return { callResult: "answered_not_interested", leadStatusCode: "R" };
+  }
+  if (reason === "verified_completed_gatekeeper_message" && result === "contact_request_review" && !K) {
+    return { callResult: "gatekeeper_admin_early_exit", leadStatusCode: attempt === 2 ? "N" : "" };
   }
   if (reason === "verified_final_opt_out" &&
       ((result === "contact_request_review" && !K) || (result === "interested_followup_review" && K === "Y"))) {
@@ -65,7 +68,9 @@ export async function verifyReviewedDisposition(row: unknown[], attempt: number,
   if (actual !== target.callResult ||
       (reason !== "verified_final_opt_out" && classifier.shouldTreatAsDoNotCall(conversation)) ||
       classifier.getExplicitCallbackConsent(conversation) ||
-      (reason === "verified_historical_gatekeeper" && classifier.getVoiceContactRequestResult(conversation))) {
+      (reason === "verified_historical_gatekeeper" && classifier.getVoiceContactRequestResult(conversation)) ||
+      (reason === "verified_completed_gatekeeper_message" &&
+        (!classifier.hasCompletedGatekeeperMessage(conversation) || classifier.hasSuccessfulTransfer(conversation)))) {
     throw new Error("Reviewed disposition final receipt does not prove the requested classification");
   }
   return { ...target, responseStatus: classifier.buildVoiceResponseStatus(target.callResult) };

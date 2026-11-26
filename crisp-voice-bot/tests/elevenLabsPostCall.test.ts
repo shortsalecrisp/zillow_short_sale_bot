@@ -22,6 +22,30 @@ process.env.ALERT_EMAIL_TO = "";
 
 const originalAdapter = axios.defaults.adapter;
 
+test("final screen, accepted admin message and lender-side decline outrank generic outcomes", async () => {
+  const api = await import("../src/lib/elevenLabsPostCall");
+  const classify = (items: string[], firstName: string, attempt = 1) => api.getAuthoritativeTerminalCallResult({
+    status: "done", has_user_audio: true,
+    transcript: items.map((message, index) => ({ role: index % 2 === 0 ? "user" : "agent", message })),
+  }, attempt, { firstName });
+  const recorded = ["Hi, if you record your...", "I'm Maya with Crisp Short Sales. How can I help?", "..."];
+  assert.equal(classify(recorded, "Andrew", 2), "agent_not_available");
+  assert.notEqual(classify([...recorded.slice(0, 2), "This is Andrew. How can I help?"], "Andrew", 2), "agent_not_available");
+  const gatekeeper = ["Zara's phone, this is Jen.", "Hi, Maya with Crisp Short Sales.",
+    "Zara is unavailable, but I'm her assistant, Jen. Could you please leave your contact details?",
+    "Yoni is our short sale specialist and his direct number is four zero four.",
+    "Got it. I will pass those details about Yoni to Zara for review.", "Thank you, Jen.", "I will let Zara know."];
+  assert.equal(classify(gatekeeper, "Zara"), "gatekeeper_admin_early_exit");
+  assert.equal(api.hasCompletedGatekeeperMessage({ transcript: gatekeeper.slice(0, 4).map((message, index) => ({
+    role: index % 2 === 0 ? "user" : "agent", message,
+  })) }), false);
+  const decline = ["Hello?", "Is Thirty Five East 1225 South your listing?", "Yes, it is.",
+    "Would help with lender paperwork or calls be useful for this listing?",
+    "No, I've already got contacts with the bank. I think I'm, I think I'm okay. We'll wait and see, but so far, so good.",
+    "Understood. Thanks for letting me know.", "Okay. Yep. Thanks."];
+  assert.equal(classify(decline, "Mindi"), "answered_not_interested");
+});
+
 test("approved plural opt-out wins and filler timing never invents or overrides consent", async () => {
   const api = await import('../src/lib/elevenLabsPostCall');
   const optout={status:'done',transcript:[{role:'agent',message:'Would help with lender paperwork or calls be useful for this listing?'},{role:'user',message:'No, we already got it. Take us off your list.'}]};
