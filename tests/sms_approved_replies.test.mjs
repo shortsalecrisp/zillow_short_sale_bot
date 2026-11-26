@@ -27,6 +27,14 @@ const answer = (text, row = {}, options = {}) => {
   return {h, r: h.incoming(text)};
 };
 
+test('narrow bank compensation questions get the direct approved answer', () => {
+  const expected = 'No—the bank does not compensate me. My fee is a flat $5,000 paid by the buyer at closing only if the deal closes. There is no fee to you or the seller, and I do not take anything from your commission.';
+  for (const text of ['Out of curiosity, would you be compensated through the bank?', 'Does the lender pay you?']) {
+    assert.equal(answer(text).r.reply_text, expected);
+  }
+  assert.notEqual(answer('Does the bank pay you? Can you call me tomorrow?').r.reply_text, expected);
+});
+
 test('buyer affordability right now is answered without call-now takeover', () => {
   const h = smsHarness();
   const r = h.incoming("Oh wow Okay, thanks most buyers don't have that much right now");

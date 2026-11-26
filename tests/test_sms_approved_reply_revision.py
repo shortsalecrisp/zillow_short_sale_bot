@@ -38,6 +38,14 @@ COUNT_ADMISSION = (
 )
 
 
+def test_bank_compensation_reply_answers_directly(chatbot):
+    expected = (
+        "No—the bank does not compensate me. My fee is a flat $5,000 paid by the buyer at closing only if the deal "
+        "closes. There is no fee to you or the seller, and I do not take anything from your commission."
+    )
+    assert chatbot.receive("Out of curiosity, would you be compensated through the bank?")["reply_text"] == expected
+
+
 @pytest.fixture
 def chatbot(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())

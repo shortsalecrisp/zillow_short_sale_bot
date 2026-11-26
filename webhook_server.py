@@ -8367,6 +8367,17 @@ def _sms_fast_decision(
     if _sms_is_property_logistics_request(t, row_obj):
         return _sms_service_scope_decision(row_obj)
 
+    if re.fullmatch(
+        r"(?:out of curiosity[, ]+)?(?:(?:(?:do|would|will|are) you (?:get paid|be paid|be compensated)|are you compensated) "
+        r"(?:by|through|from) (?:the |a )?(?:bank|lender)|(?:does|would|will) (?:the |a )?(?:bank|lender) "
+        r"(?:pay|compensate) you)[?.! ]*", t,
+    ):
+        return _sms_decision(
+            reply_text=("No—the bank does not compensate me. My fee is a flat $5,000 paid by the buyer at closing "
+                        "only if the deal closes. There is no fee to you or the seller, and I do not take anything "
+                        "from your commission."),
+            response_id="fee_specific", lead_status="Y", reason="Answered a narrow bank-compensation question directly",
+        )
     priority_question = _sms_question_priority_decision(row_obj, inbound_text, received_at)
     if priority_question is not None:
         return priority_question

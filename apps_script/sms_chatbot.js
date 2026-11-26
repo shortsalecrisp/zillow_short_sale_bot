@@ -3362,6 +3362,12 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (/^(?:out of curiosity[, ]+)?(?:(?:do|would|will|are) you (?:get paid|be paid|be compensated)|are you compensated) (?:by|through|from) (?:the |a )?(?:bank|lender)[?.! ]*$/.test(t) ||
+      /^(?:out of curiosity[, ]+)?(?:does|would|will) (?:the |a )?(?:bank|lender) (?:pay|compensate) you[?.! ]*$/.test(t)) {
+    return {matched: true, reply_text: "No—the bank does not compensate me. My fee is a flat $5,000 paid by the buyer at closing only if the deal closes. There is no fee to you or the seller, and I do not take anything from your commission.",
+      response_id: "fee_specific", lead_status: "Y", conversation_done: false, handoff_needed: false,
+      needs_review: false, block_reply: false, reason: "Answered a narrow bank-compensation question directly"};
+  }
   const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
   if (priorityQuestion) return priorityQuestion;
 
