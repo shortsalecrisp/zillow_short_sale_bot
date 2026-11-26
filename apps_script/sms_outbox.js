@@ -153,6 +153,68 @@ function initialSmsPendingWindowDecisionV27_(row, at) {
   return initialSmsLocalWindowDecisionV27_(initialSmsTimeZoneForPendingRowV27_(row), at);
 }
 
+function getOwnerThanksgivingPolicyV38_() {
+  if (typeof PropertiesService === "undefined") return { enabled: false, version: "thanksgiving-20261126-v1" };
+  var value = PropertiesService.getScriptProperties().getProperty("OWNER_THANKSGIVING_FOLLOWUP_20261126_V1");
+  if (!value) return { enabled: false, version: "thanksgiving-20261126-v1" };
+  var policy = JSON.parse(value);
+  if (Object.keys(policy).length !== 6 || policy.enabled !== true || policy.version !== "thanksgiving-20261126-v1"
+      || policy.resume_local !== "2026-11-27 09:00:00" || policy.initial_sms_unchanged !== true
+      || policy.inbound_replies_unchanged !== true || policy.calling_blackout_local_date !== "2026-11-26") {
+    throw new Error("Owner Thanksgiving policy is malformed; follow-up authorization held");
+  }
+  return policy;
+}
+
+function applyOwnerThanksgivingPolicyV38_(body) {
+  if (!body || body.confirmation !== "pause_followups_until_20261127_0900_local") {
+    return { ok: false, error: "Exact owner Thanksgiving confirmation required" };
+  }
+  var policy = { enabled: true, version: "thanksgiving-20261126-v1", resume_local: "2026-11-27 09:00:00",
+    initial_sms_unchanged: true, inbound_replies_unchanged: true, calling_blackout_local_date: "2026-11-26" };
+  PropertiesService.getScriptProperties().setProperty("OWNER_THANKSGIVING_FOLLOWUP_20261126_V1", JSON.stringify(policy));
+  return { ok: true, policy: getOwnerThanksgivingPolicyV38_(), messages_sent: 0 };
+}
+
+function thanksgivingFollowupZoneDecisionV38_(timeZone, at, policy) {
+  if (!policy || policy.enabled !== true) return null;
+  var now = at instanceof Date ? at : new Date(at || Date.now());
+  // This one-off owner instruction expires; it cannot change later campaigns.
+  if (now.getTime() >= Date.parse("2026-11-28T00:00:00Z")) return null;
+  if (!timeZone) return { eligible: false, retryable: true,
+    reason: "Thanksgiving follow-up hold: verified listing time zone required", not_before: new Date("2026-11-27T19:00:00Z") };
+  var release = Utilities.parseDate(policy.resume_local, timeZone, "yyyy-MM-dd HH:mm:ss");
+  return now < release ? { eligible: false, retryable: true, time_zone: timeZone, not_before: release,
+    reason: "Owner Thanksgiving follow-up hold until Friday November 27 at 9:00 AM listing-local time" } : null;
+}
+
+function thanksgivingFollowupPendingDecisionV38_(row, at) {
+  var raw = String(row && row[6] || "");
+  if (raw.indexOf("__scheduled_followup__:") !== 0 && raw.indexOf("__crm_followup__:") !== 0) return null;
+  var policy = getOwnerThanksgivingPolicyV38_();
+  if (!policy.enabled || new Date(at || Date.now()).getTime() >= Date.parse("2026-11-28T00:00:00Z")) return null;
+  var zone = "";
+  try {
+    var metadata = JSON.parse(raw.slice(raw.indexOf(":") + 1));
+    var crmRow = Number(metadata.crm_row || row[17] || 0);
+    if (Number.isInteger(crmRow) && crmRow >= 2) {
+      var lead = getSheet_().getRange(crmRow, 1, 1, 7).getValues()[0];
+      if (normalizePhone_(lead[2]) === normalizePhone_(row[4]) && typeof resolveListingTimeZone_ === "function") {
+        zone = resolveListingTimeZone_({ streetAddress: lead[4], city: lead[5], state: lead[6] }).timeZone || "";
+      }
+    }
+  } catch (_) { /* Unreadable or shifted identity stays held, never guessed from an area code. */ }
+  return thanksgivingFollowupZoneDecisionV38_(zone, at, policy);
+}
+
+function deferThanksgivingFollowupV38_(sheet, sheetRow, row, decision) {
+  if (row[13] || ["send_started", "sent", "uncertain", "receipt_pending"].indexOf(String(row[1])) !== -1) return row;
+  var hold = Object.assign({}, decision);
+  var existing = new Date(row[8]).getTime();
+  if (isFinite(existing) && existing > hold.not_before.getTime()) hold.not_before = new Date(existing);
+  return deferInitialSmsPendingRowV27_(sheet, sheetRow, row, hold);
+}
+
 function deferInitialSmsPendingRowV27_(sheet, sheetRow, row, decision) {
   var deferred = row.slice();
   deferred[1] = "queued";
@@ -822,10 +884,16 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
         };
       }
     }
-    sheet.appendRow([
+    var followupPendingRow = [
       new Date(), "queued", requestId, messageId, phone, replyText, metadata,
       "", new Date(), 0, "", "", "", "", "", "", "", crmRow, ""
-    ]);
+    ];
+    var followupHoliday = thanksgivingFollowupPendingDecisionV38_(followupPendingRow, new Date());
+    if (followupHoliday) {
+      followupPendingRow[8] = followupHoliday.not_before;
+      followupPendingRow[15] = followupHoliday.reason;
+    }
+    sheet.appendRow(followupPendingRow);
     if (typeof noteSmsStorageWriteV37_ === "function") noteSmsStorageWriteV37_(requestId);
     return {
       ok: true,
@@ -2913,6 +2981,11 @@ function claimPendingSmsSendOnceV36_(body, storageRead) {
         rows[activeIndex] = deferInitialSmsPendingRowV27_(sheet, activeIndex + 2, rows[activeIndex], activeInitialWindow);
         continue;
       }
+      var activeHoliday = thanksgivingFollowupPendingDecisionV38_(rows[activeIndex], new Date(now));
+      if (activeHoliday) {
+        rows[activeIndex] = deferThanksgivingFollowupV38_(sheet, activeIndex + 2, rows[activeIndex], activeHoliday);
+        continue;
+      }
       if (isOwnerVideoProbeRowV20_(rows[activeIndex]) || parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
         var activeDecision = {};
         var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex], activeDecision);
@@ -2965,6 +3038,12 @@ function claimPendingSmsSendOnceV36_(body, storageRead) {
       var initialWindow = initialSmsPendingWindowDecisionV27_(rows[i], new Date(now));
       if (initialWindow && !initialWindow.eligible) {
         rows[i] = deferInitialSmsPendingRowV27_(sheet, sheetRow, rows[i], initialWindow);
+        retryableFeaturePending = true;
+        continue;
+      }
+      var followupHoliday = thanksgivingFollowupPendingDecisionV38_(rows[i], new Date(now));
+      if (followupHoliday) {
+        rows[i] = deferThanksgivingFollowupV38_(sheet, sheetRow, rows[i], followupHoliday);
         retryableFeaturePending = true;
         continue;
       }
@@ -3110,6 +3189,16 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
     throw err;
   }
   if (!match.ok) return match;
+  var holiday = thanksgivingFollowupPendingDecisionV38_(match.values, new Date());
+  if (holiday) {
+    if (String(match.values[1]) === "send_started" || match.values[13]) return {
+      ok: false, should_send: false, retryable: false, status: String(match.values[1]),
+      reason: "Prior send authorization needs reconciliation; Thanksgiving hold never authorizes a resend"
+    };
+    deferThanksgivingFollowupV38_(match.sheet, match.row, match.values, holiday);
+    return { ok: false, should_send: false, retryable: true, status: "queued", reason: holiday.reason,
+      retry_after_seconds: Math.max(60, Math.ceil((holiday.not_before.getTime() - Date.now()) / 1000)) };
+  }
   var remainingLease = new Date(match.values[11]).getTime() - Date.now();
   if (String(match.values[1]) === "claimed" && (!isFinite(remainingLease) || remainingLease < 30000)) {
     return { ok: false, should_send: false, retryable: true, reason: "Claim lease is too close to expiry; no SMS authorized" };

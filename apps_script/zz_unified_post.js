@@ -30,6 +30,8 @@ function isUnifiedSmsAction_(action) {
     recover_uncertain_send: true,
     tasker_heartbeat: true,
     codex_probe: true,
+    owner_holiday_policy: true,
+    apply_owner_holiday_policy: true,
     request_info_email_approval: true,
     mark_override: true,
     takeover: true
@@ -103,6 +105,8 @@ function handleUnifiedSmsPost_(e) {
     validateToken_(body.token);
 
     var action = String(body.action || "incoming_sms").toLowerCase();
+    if (action === "owner_holiday_policy") return jsonOutput_({ ok: true, read_only: true, policy: getOwnerThanksgivingPolicyV38_() });
+    if (action === "apply_owner_holiday_policy") return jsonOutput_(applyOwnerThanksgivingPolicyV38_(body));
     if (action === "enqueue_owner_video_probe") return jsonOutput_(enqueueOwnerVideoProbeV20_(body));
     if (action === "get_owner_video_probe_status") return jsonOutput_(getOwnerVideoProbeStatusV20_(body));
     if (action === "check_video_followup_eligibility") {
