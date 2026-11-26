@@ -1285,6 +1285,7 @@ function getVoiceBotAgentTimeZone_(rowValues) {
 
 function getVoiceBotPreferredCallWindowName_(date, timeZone) {
   if (!timeZone) return '';
+  if (getVoiceBotLocalDateKey_(date, timeZone) === '2026-11-26') return '';
   const day = Number(Utilities.formatDate(date, timeZone, 'u'));
   const callWindows = getVoiceBotCallWindowsForDay_(day);
   const localMinutes = getVoiceBotLocalMinutes_(date, timeZone);
@@ -1311,6 +1312,7 @@ function getVoiceBotCallWindowsForDay_(day) {
 }
 
 function getVoiceBotCallWindowForDateKey_(dateKey, timeZone) {
+  if (dateKey === '2026-11-26') return null;
   const probeDate = buildVoiceBotDateInTimeZone_(dateKey, 12 * 60, timeZone);
   const day = Number(Utilities.formatDate(probeDate, timeZone, 'u'));
   const callWindows = getVoiceBotCallWindowsForDay_(day);
@@ -1318,6 +1320,7 @@ function getVoiceBotCallWindowForDateKey_(dateKey, timeZone) {
 }
 
 function getVoiceBotCallWindowByNameForDateKey_(dateKey, timeZone, windowName) {
+  if (dateKey === '2026-11-26') return null;
   const probeDate = buildVoiceBotDateInTimeZone_(dateKey, 12 * 60, timeZone);
   const day = Number(Utilities.formatDate(probeDate, timeZone, 'u'));
   const callWindows = getVoiceBotCallWindowsForDay_(day);

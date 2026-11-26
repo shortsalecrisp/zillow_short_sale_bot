@@ -1,4 +1,5 @@
 import { resolveListingTimeZone } from "./listingTimeZone";
+import { isOwnerCallBlackoutDate } from "./ownerContactCalendar";
 
 export const VOICE_BOT_SHEET_NAME = "Sheet1";
 export const VOICE_BOT_TIMEZONE = "America/New_York";
@@ -270,6 +271,7 @@ export function getVoiceBotCallWindowsForDay(day: number): VoiceCallWindow[] {
 
 export function getVoiceBotPreferredCallWindowName(date: Date, timeZone: string): string {
   if (!timeZone) return "";
+  if (isOwnerCallBlackoutDate(getVoiceBotLocalDateKey(date, timeZone))) return "";
   const callWindows = getVoiceBotCallWindowsForDay(weekdayNumber(date, timeZone));
   const localMinutes = getVoiceBotLocalMinutes(date, timeZone);
 
@@ -283,6 +285,7 @@ export function getVoiceBotPreferredCallWindowName(date: Date, timeZone: string)
 }
 
 function getVoiceBotCallWindowForDateKey(dateKey: string, timeZone: string): VoiceCallWindow | undefined {
+  if (isOwnerCallBlackoutDate(dateKey)) return undefined;
   const probeDate = buildVoiceBotDateInTimeZone(dateKey, 12 * 60, timeZone);
   const windows = getVoiceBotCallWindowsForDay(weekdayNumber(probeDate, timeZone));
   return windows[0];
@@ -293,6 +296,7 @@ function getVoiceBotCallWindowByNameForDateKey(
   timeZone: string,
   windowName: string,
 ): VoiceCallWindow | undefined {
+  if (isOwnerCallBlackoutDate(dateKey)) return undefined;
   const probeDate = buildVoiceBotDateInTimeZone(dateKey, 12 * 60, timeZone);
   const windows = getVoiceBotCallWindowsForDay(weekdayNumber(probeDate, timeZone));
   return windows.find((callWindow) => callWindow.name === windowName);

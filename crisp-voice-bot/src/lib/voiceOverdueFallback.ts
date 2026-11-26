@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { hasUnresolvedVoiceStart } from "./voiceTransportRecovery";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 import { currentPhoneVoiceRow } from "./voicePhoneEpisode";
+import { isOwnerCallBlackoutDate } from "./ownerContactCalendar";
 import {
   buildVoiceBotDateInTimeZone,
   getNextVoiceBotFirstAttemptWindowStart,
@@ -67,7 +68,7 @@ export function getVoiceMissedWindowDeadline(scheduledFor: Date, timeZone: strin
     const cursor = new Date(`${key}T12:00:00Z`);
     cursor.setUTCDate(cursor.getUTCDate() + 1);
     key = cursor.toISOString().slice(0, 10);
-    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6) remaining -= 1;
+    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6 && !isOwnerCallBlackoutDate(key)) remaining -= 1;
   }
   return buildVoiceBotDateInTimeZone(key, endMinutes, timeZone);
 }

@@ -24,6 +24,7 @@ import telnyxWebhookRouter from "./routes/telnyxWebhook";
 import voiceQueueRouter from "./routes/voiceQueue";
 import returnCallsRouter, { returnCallsReady } from "./routes/returnCalls";
 import callbackAlertsRouter from "./routes/callbackAlerts";
+import { OWNER_CALL_BLACKOUT_DATES } from "./lib/ownerContactCalendar";
 import { getVoiceCallbackAlertStatus, startVoiceCallbackAlertWorker } from "./lib/voiceCallbackAlerts";
 
 const app = express();
@@ -73,6 +74,8 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       coldRetryMaxAttempts: 2,
       providerStartRecoveryBusinessDays: 1,
       unresolvedTimeZone: "hold_for_review",
+      ownerBlackoutLocalDates: OWNER_CALL_BLACKOUT_DATES,
+      thanksgivingReschedule: "November 26 calls join November 27 calls in their existing local windows",
     },
     ownerControl: {
       outboundEnabled: config.outboundVoice.enabled,

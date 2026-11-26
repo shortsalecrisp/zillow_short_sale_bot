@@ -1,4 +1,5 @@
 import type { StartCallRequest } from "../types";
+import { getOwnerCallBlackoutReason } from "./ownerContactCalendar";
 
 export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: number }> = {
   morning_probe: {
@@ -54,6 +55,8 @@ export function getStartCallWindowBlockReason(
 
   let localMinutes: number;
   try {
+    const holiday = getOwnerCallBlackoutReason(now, payload.agentTimeZone);
+    if (holiday) return holiday;
     localMinutes = getLocalCallMinutes(now, payload.agentTimeZone);
     if (payload.scheduledWindow?.startsWith("reach_")) {
       const day = new Intl.DateTimeFormat("en-US", { timeZone: payload.agentTimeZone, weekday: "short" }).format(now);
