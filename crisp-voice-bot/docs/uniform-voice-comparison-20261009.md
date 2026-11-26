@@ -1,8 +1,59 @@
 # Uniform Conversion Comparison
 
-Current shared script revision is r28. The owner ended the 50/50 experiment on November 25
+Current production script revision is r29. The owner ended the 50/50 experiment on November 25
 and selected v4 Turbo for all new conversations. This is an owner decision, not a proven
 statistical winner. Earlier releases and the closed comparison remain historical and are never pooled.
+
+## November 26: Approved V4 Production Repair R29
+
+Yoni approved repairing the flagged organic calls. The guarded paired production publisher
+read both final versions and native allocation independently at `2026-11-26T13:34:56.850Z`
+(8:34:56.850 AM America/New_York). This is a script release within v4-only production,
+not a reopened experiment or a reset of the November 25 model-adoption boundary.
+
+- Production release: `maya_v4_production_20261126_r29`; declared policy
+  `maya-v4-production-20261126-r29`.
+- Flash remains **0%**, `agtvrsn_5501m8c11ty3fyb90zk5hcr4cvy4`, `eleven_flash_v2`.
+- V4 remains **100%**, `agtvrsn_1001m8c11yw2e1nbvnew4v7qvtqq`, `eleven_v4_turbo`.
+- Root: 6,288 words, SHA-256 `97e11856922d164bdec3a3e8248d8412421a3760ad551ada461b8dbfe48fcd4a`.
+- Shared normalized body: `5ce0c65a4c61dd2113b815fa2c2cb1bda5de9f2e05b946ce0ed280262708d5f5`.
+- Workflow: `bcbbbca3e67c454ca97e393b572ae016f91fb84c9347dc765638b5306cadc467`.
+
+Exactly eight reviewed paths changed: root, opening-listener prompt, main additional prompt,
+short-listing-recovery prompt and edge order, both existing recording-exit conditions, and
+one new recovery-to-existing-silent-end edge. Both stored branches remain identical except
+TTS. The inactive Flash branch was patched first; no allocation write was made. All other
+configuration, tools, audio, voice/settings, gpt-4.1/turn_v3 and protected fields were hashed
+unchanged. Live contact/ending guards remain ahead of recording exits.
+
+A completed attempt-two mailbox or terminal unavailable screener now takes one silent
+workflow ending before skip_turn, not conflicting native-tool/fallback paths. Attempt-one
+message invitations keep their existing native message. Active hold, incomplete recordings,
+later real speech, pending questions, callbacks, opt-outs and takeover keep priority.
+An unscreened presence check before introduction uses the opening, never the needs question.
+New listeners hear Maya/Crisp identity even if they give the expected name. Confirmed-state
+recovery requires actual delivered identity and explicit listing confirmation in this call.
+A clipped "Hi, if you record your..." is incomplete screening, not a human pickup or an exit cue.
+
+Backend classification and contact metrics recognize that clipped screening fragment and
+preserve later live speech. Andrew row7115's owning metrics were reconciled from a fresh
+exact final receipt without changing his already-correct unavailable label, exhausted cadence,
+phone, attempts or contact preferences. No post-call replay, call or notification was triggered.
+
+The r28 comparison remains closed with its original pins and boundaries. Earlier r28 v4-only
+calls retain their own production phase, never relabeled r29. Attribution excludes ambiguous
+release seconds and requires exact final branch/version plus start/duration/non-test evidence.
+The canonical CLI still performs three GETs; shared audio is a separate fourth GET. Historical
+`verifyLiveComparison` defaults to the closed r28 pins and still requires 50/50. No response
+normalizer changed. The publisher's new repair profile alone requires exact 0/100; older
+comparison profiles remain blocked on production allocation.
+
+Thanksgiving blackout, six Friday carry-forwards, follow-up SMS hold until Friday 9 AM local,
+original callback-email template/deduplication, consent and all safety exclusions remain unchanged.
+Configuration and regression tests are not organic or acoustic proof. No test calls/messages
+were placed; the next real Friday calls must confirm the repairs. Plan, final paired receipt
+and independent canonical/audio readback: task artifact directory
+`voice-terminal-opening-repair-20261126/`.
 
 ## November 25: Owner-Approved V4-Only Production
 

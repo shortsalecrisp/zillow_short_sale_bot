@@ -1,6 +1,6 @@
 import type { CallMetadata } from "../types";
 import { isOrganizationServiceGreeting, matchesReviewedFirstName } from "./elevenLabsContactIdentity";
-import { isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
+import { isAutomatedMessageTakerConversation, isClippedScreeningInstruction, isRecordedNoVoicemailGreeting, isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
 import {
   hasCallbackOrLaterSignal,
   hasClearLiveTransferConsent,
@@ -17,7 +17,7 @@ import {
   ELEVENLABS_V4_PRODUCTION,
   ELEVENLABS_TTS_COMPARISON_ENDED_AT,
   uniformComparisonArm,
-  v4ProductionReceiptMatched,
+  v4ProductionReceiptRelease,
 } from "./elevenLabsRuntimeExperiment";
 
 export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
@@ -129,6 +129,7 @@ type AutomatedContact = "voicemail" | "screening" | "ivr";
 
 function automatedContactType(message: string): AutomatedContact | null {
   const text = normalizeText(message);
+  if (isClippedScreeningInstruction(message)) return "screening";
   if (isRecordedNoVoicemailGreeting(message)) return "voicemail";
   if (/\b(?:call assist|google (?:call )?screening|automated (?:call )?screener)\b/.test(text)) return "screening";
   if (/\b(?:press|dial) (?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/.test(text) ||
@@ -481,7 +482,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   // Wording belongs to the policy family, not a revision allowlist. Provider/cohort admission stays exact.
   const policy = input.metadata.declaredConversationPolicyVersion ?? "";
   const usesServiceFirstOpening = policy === "maya-service-first-recovery-20261003" ||
-    /^maya-uniform-lead-conversion-\d{8}(?:-r[1-9]\d*)?$/.test(policy);
+    /^maya-uniform-lead-conversion-\d{8}(?:-r[1-9]\d*)?$/.test(policy) || policy === "maya-v4-production-20261126-r29";
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
     liveSpeechTranscript,
@@ -524,6 +525,10 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const callbackRequestCaptured = finalReceiptMatched && callbackConsent &&
     hasCapturedCallbackResult(transcript, input.callbackConsent!.callbackTime);
   const transferCompleted = finalReceiptMatched && clearLiveTransferConsent && hasSuccessfulTransferResult(transcript);
+  const productionRelease = v4ProductionReceiptRelease({ finalReceiptMatched,
+    testMode: Boolean(input.metadata.testMode || input.metadata.providerProofCall), durationSecs,
+    startTimeUnixSecs: input.conversation.metadata?.start_time_unix_secs,
+    branchId: input.conversation.branch_id, versionId: input.conversation.version_id });
 
   const payload = {
     schema: "voice_call_metrics_v1",
@@ -578,10 +583,9 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     },
     ttsProduction: {
       ...ELEVENLABS_V4_PRODUCTION,
-      finalReceiptMatched: v4ProductionReceiptMatched({ finalReceiptMatched,
-        testMode: Boolean(input.metadata.testMode || input.metadata.providerProofCall), durationSecs,
-        startTimeUnixSecs: input.conversation.metadata?.start_time_unix_secs,
-        branchId: input.conversation.branch_id, versionId: input.conversation.version_id }),
+      // A recovered older final receipt keeps its own production script phase.
+      ...(productionRelease ?? { releaseId: null, releaseStartedAt: null, releaseEndedAt: null, versionId: null }),
+      finalReceiptMatched: productionRelease !== null,
     },
     call: {
       conversationId: input.conversationId,

@@ -158,8 +158,8 @@ test('attempt-one voicemail remains backend-owned and cannot be recited on attem
   assert.deepEqual(lines, []);
   const backend = await readFile(new URL('../src/lib/elevenLabs.ts', import.meta.url), 'utf8');
   assert.ok(backend.includes(expected.replace('{{assistantName}}', '${assistantName}').replace('{{streetAddress}}', '${streetAddress}')));
-  assert.match(prompt, /Attempt 2: after a completed mailbox greeting/);
-  assert.match(prompt, /invoke voicemail_detection immediately ONLY when \{\{voicemailMessage\}\} is empty/);
-  assert.match(prompt, /Never speak, improvise a message, skip_turn or wait for a beep afterward/);
+  assert.match(prompt, /Attempt 2: a completed mailbox greeting/);
+  assert.match(prompt, /goes directly to recorded_no_voicemail_exit, silently, before skip_turn/);
+  assert.match(prompt, /Never use voicemail_detection, speak, leave a message or wait for another beep/);
   assert.match(prompt, /Wrong-person voicemail protection applies only to a recording, not a live admin/);
 });

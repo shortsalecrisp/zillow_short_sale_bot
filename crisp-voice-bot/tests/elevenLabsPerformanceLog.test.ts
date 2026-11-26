@@ -173,6 +173,26 @@ async function measurementLog(input: { metadata?: Partial<CallMetadata>; convers
   }).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
 }
 
+test("recovered production metrics retain the receipt's script phase rather than the current version", async () => {
+  const { ELEVENLABS_V4_PRODUCTION, ELEVENLABS_V4_PRODUCTION_RELEASES } = await import("../src/lib/elevenLabsRuntimeExperiment");
+  for (const release of ELEVENLABS_V4_PRODUCTION_RELEASES) {
+    const result = await measurementLog({ metadata: { testMode: false }, conversation: {
+      branch_id: ELEVENLABS_V4_PRODUCTION.branchId, version_id: release.versionId,
+      metadata: { call_duration_secs: 20, start_time_unix_secs: Math.ceil(Date.parse(release.releaseStartedAt) / 1000) },
+    } });
+    assert.equal(result.ttsProduction.finalReceiptMatched, true);
+    assert.equal(result.ttsProduction.releaseId, release.releaseId);
+    assert.equal(result.ttsProduction.versionId, release.versionId);
+    assert.equal(result.ttsProduction.startedAt, "2026-11-25T17:40:58.963Z");
+    assert.equal(result.ttsModelExperiment.uniformComparison.eligibleArm, null);
+  }
+  const unknown = await measurementLog({ metadata: { testMode: false }, conversation: { branch_id: ELEVENLABS_V4_PRODUCTION.branchId,
+    version_id: "unknown", metadata: { call_duration_secs: 20, start_time_unix_secs: 1795690000 } } });
+  assert.equal(unknown.ttsProduction.finalReceiptMatched, false);
+  assert.equal(unknown.ttsProduction.versionId, null);
+  assert.equal(unknown.ttsProduction.releaseId, null);
+});
+
 test("terminal outcome precedence drives the metrics contact bucket", async () => {
   const voicemail = await measurementLog({ terminalCallResult: "voicemail_reached", conversation: { transcript: [
     { role: "user", message: "Hello." },

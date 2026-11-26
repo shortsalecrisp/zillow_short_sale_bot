@@ -9,9 +9,11 @@ import {
   getElevenLabsRuntimeExperimentStatus,
   ELEVENLABS_TTS_COMPARISON_ENDED_AT,
   ELEVENLABS_V4_PRODUCTION,
+  ELEVENLABS_V4_PRODUCTION_RELEASES,
   ELEVENLABS_UNIFORM_COMPARISON,
   uniformComparisonArm,
   v4ProductionReceiptMatched,
+  v4ProductionReceiptRelease,
 } from "../src/lib/elevenLabsRuntimeExperiment";
 
 function baseline() {
@@ -79,7 +81,7 @@ test("runtime declares owner-selected v4-only production and closes the historic
 test("new production calls and the ambiguous cutover second never enter the historical comparison", () => {
   const input = { finalReceiptMatched: true, testMode: false, durationSecs: 20,
     startTimeUnixSecs: Math.ceil(Date.parse(ELEVENLABS_UNIFORM_COMPARISON.startedAt) / 1000),
-    branchId: ELEVENLABS_V4_PRODUCTION.branchId, versionId: ELEVENLABS_V4_PRODUCTION.versionId };
+    branchId: ELEVENLABS_V4_PRODUCTION.branchId, versionId: ELEVENLABS_UNIFORM_COMPARISON.testVersionId };
   assert.equal(uniformComparisonArm(input), "v4_turbo_test");
   assert.equal(v4ProductionReceiptMatched(input), false);
   input.startTimeUnixSecs = Math.floor(Date.parse(ELEVENLABS_TTS_COMPARISON_ENDED_AT) / 1000);
@@ -92,4 +94,22 @@ test("new production calls and the ambiguous cutover second never enter the hist
     { branchId: 'unknown' }, { durationSecs: 0 }, { durationSecs: Number.NaN }, { startTimeUnixSecs: null }]) {
     assert.equal(v4ProductionReceiptMatched({ ...input, ...edit }), false);
   }
+});
+
+test("production script repair preserves the adoption boundary and older receipt phase without admitting transition seconds", () => {
+  const [old, current] = ELEVENLABS_V4_PRODUCTION_RELEASES;
+  const input = { finalReceiptMatched: true, testMode: false, durationSecs: 20,
+    branchId: ELEVENLABS_V4_PRODUCTION.branchId, versionId: old.versionId,
+    startTimeUnixSecs: Math.ceil(Date.parse(old.releaseStartedAt) / 1000) };
+  assert.equal(v4ProductionReceiptRelease(input)?.releaseId, old.releaseId);
+  assert.equal(ELEVENLABS_V4_PRODUCTION.startedAt, "2026-11-25T17:40:58.963Z");
+  assert.equal(ELEVENLABS_UNIFORM_COMPARISON.testVersionId, old.versionId);
+  input.startTimeUnixSecs = Math.floor(Date.parse(current.releaseStartedAt) / 1000);
+  assert.equal(v4ProductionReceiptRelease(input), null);
+  input.versionId = current.versionId;
+  assert.equal(v4ProductionReceiptRelease(input), null);
+  input.startTimeUnixSecs = Math.ceil(Date.parse(current.releaseStartedAt) / 1000);
+  assert.equal(v4ProductionReceiptRelease(input)?.releaseId, current.releaseId);
+  input.versionId = old.versionId;
+  assert.equal(v4ProductionReceiptRelease(input), null);
 });

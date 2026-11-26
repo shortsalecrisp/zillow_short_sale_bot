@@ -17,8 +17,7 @@ export const R26_COMPARISON = {
   ],
 };
 
-// Retain the verifier's existing export name for current-release callers.
-export const R8_COMPARISON = {
+export const R28_COMPARISON = {
   ...R26_COMPARISON,
   cohort: 'maya_uniform_lead_conversion_20261125_r28',
   startedAt: '2026-11-25T13:27:50.274Z',
@@ -28,6 +27,20 @@ export const R8_COMPARISON = {
   arms: [
     { ...R26_COMPARISON.arms[0], versionId: 'agtvrsn_5901m89e84k7f28rmq7bqzwshx2q' },
     { ...R26_COMPARISON.arms[1], versionId: 'agtvrsn_1301m89e87r0expr4tenxnxjqngj' },
+  ],
+};
+
+// Retain the existing export name for callers of the current production verifier.
+export const R8_COMPARISON = {
+  ...R28_COMPARISON,
+  cohort: 'maya_v4_production_20261126_r29',
+  startedAt: '2026-11-26T13:34:56.850Z',
+  endedAt: null,
+  sharedHash: '5ce0c65a4c61dd2113b815fa2c2cb1bda5de9f2e05b946ce0ed280262708d5f5',
+  workflowHash: 'bcbbbca3e67c454ca97e393b572ae016f91fb84c9347dc765638b5306cadc467',
+  arms: [
+    { ...R28_COMPARISON.arms[0], versionId: 'agtvrsn_5501m8c11ty3fyb90zk5hcr4cvy4' },
+    { ...R28_COMPARISON.arms[1], versionId: 'agtvrsn_1001m8c11yw2e1nbvnew4v7qvtqq' },
   ],
 };
 
@@ -164,7 +177,7 @@ export function comparisonBody(agent) {
   return body;
 }
 
-export function validateComparison(agents, allocation, expected = R8_COMPARISON) {
+export function validateComparison(agents, allocation, expected = R28_COMPARISON) {
   return validatePinnedAllocation(agents, allocation, expected, [50, 50]);
 }
 
@@ -207,7 +220,7 @@ function validatePinnedAllocation(agents, allocation, expected, percentages) {
     sharedHash: expected.sharedHash, workflowHash: expected.workflowHash, arms };
 }
 
-export async function verifyLiveComparison({ apiKey, expected = R8_COMPARISON }, fetcher = fetch) {
+export async function verifyLiveComparison({ apiKey, expected = R28_COMPARISON }, fetcher = fetch) {
   return verifyLivePinnedAllocation({ apiKey, expected }, validateComparison, fetcher);
 }
 

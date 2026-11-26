@@ -26,15 +26,14 @@ const done = (transcript: Array<{ role: string; message: string }>, summary = ""
   transcript,
 });
 
-test("self-identified target after screening gets only the short listing question", () => {
+test("new target after screening hears identity; only an already introduced listener gets a bare listing question", () => {
   const prompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
-  assert.match(OPENING_HANDOFF_POLICY, /explicitly identifies themself as the expected target/);
+  assert.match(OPENING_HANDOFF_POLICY, /A matching name does not prove delivered identity/);
   assert.ok(OPENING_HANDOFF_POLICY.includes(VOICE_SHORT_LISTING_RECOVERY));
-  assert.match(prompt, /matching spoken \{\{firstName\}\}/);
-  assert.match(prompt, /Only AFTER that announcement: a matching spoken/);
-  assert.match(prompt, /Do not repeat the full opener after screening/);
-  assert.match(prompt, /an unnamed or differently named new listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
-  assert.match(prompt, /Silence or skip_turn never proves identity or screening/);
+  assert.match(prompt, /A new listener gets "Hi, \{\{assistantName\}\} with Crisp Short Sales/);
+  assert.match(prompt, /regardless of name/);
+  assert.match(prompt, /Only the same listener who heard your identity gets a bare listing check/);
+  assert.match(prompt, /Never infer identity from the lead name, silence or skip_turn/);
 });
 
 test("named target after screening outranks gatekeeper persistence", async () => {

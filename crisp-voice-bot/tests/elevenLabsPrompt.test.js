@@ -35,7 +35,7 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /requires this entire opening once/);
+  assert.match(s, /requires this opening once/);
   assert.match(s, /\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale lender paperwork\. Is \{\{streetAddress\}\} your listing\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
@@ -79,13 +79,13 @@ test("a question keeps the entire response answer-only even after it is answered
 test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
   const s = section("Intro only");
-  assert.match(s, /Answer first-turn questions directly, without repeating an introduction/);
-  assert.match(s, /Shortening requires actual earlier automated screening\/hold, never just a name or hello/);
-  assert.match(s, /matching spoken \{\{firstName\}\}/);
+  assert.match(s, /Answer first-turn questions directly/);
+  assert.match(s, /Shortening requires actual earlier screening\/hold, not a name or hello/);
+  assert.match(s, /regardless of name/);
   assert.match(s, /Hi, \{\{assistantName\}\} with Crisp Short Sales\. Is \{\{streetAddress\}\} your listing\?/);
-  assert.match(s, /After delivered identity, repeat only the pending listing check while unconfirmed/);
-  assert.match(s, /after confirmation repair only the pending question/);
-  assert.match(s, /Do not repeat the full opener after screening/);
+  assert.match(s, /Only the same listener who heard your identity gets a bare listing check/);
+  assert.match(s, /Needs\/presence recovery requires that listener's explicit listing confirmation/);
+  assert.match(s, /otherwise repair only the listing question/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -140,8 +140,9 @@ test("affiliation, property and number corrections answer the specific missing p
 });
 test("noise and partial turns cannot create contact decisions", () => {
   const s = section("Listening and repair");
-  assert.match(s, /If the latest caller message is exactly "\.\.\."/);
-  assert.match(s, /An intelligible question is not noise/);
+  assert.match(s, /Resolve completed recording exits BEFORE skip_turn/);
+  assert.match(s, /Otherwise, for "\.\.\."/);
+  assert.match(s, /Intelligible speech is not noise/);
   assert.match(s, /Do not infer a name, yes, callback, rejection, or transfer from background speech/);
   assert.match(s, /do not finish over the caller/);
   assert.match(s, /A thinking pause is not an invitation to complete their sentence/);
@@ -330,10 +331,10 @@ test("voicemail keeps attempt limits, live-admin distinction and safe mismatch h
   assert.match(s, /Attempt 1:[^\n]+Let the greeting finish/);
   assert.match(s, /do not call voicemail_detection mid-sentence without a clear pause/);
   assert.match(s, /a beep is not required/);
-  assert.match(s, /Attempt 2: after a completed mailbox greeting/);
-  assert.match(s, /invoke voicemail_detection immediately ONLY when \{\{voicemailMessage\}\} is empty/);
-  assert.match(s, /terminal busy\/unavailable screener inviting a message/);
-  assert.match(s, /If the tool is unavailable or the payload is not empty, use recorded_no_voicemail_exit instead/);
+  assert.match(s, /Attempt 2: a completed mailbox greeting/);
+  assert.match(s, /terminal unavailable screener inviting a message goes directly to recorded_no_voicemail_exit/);
+  assert.match(s, /Never use voicemail_detection, speak, leave a message or wait for another beep/);
+  assert.match(s, /Active connecting\/hold, incomplete recordings and later live questions/);
   assert.match(s, /Screening\/hold that is still trying to reach a person is not voicemail and is not an exit reason/);
   assert.match(s, /completed recorded[^\n]+silent no-message exit, not voicemail_detection/);
   assert.match(s, /infer no live opt-out, callback or SMS consent/);

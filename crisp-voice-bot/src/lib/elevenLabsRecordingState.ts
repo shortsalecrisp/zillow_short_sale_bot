@@ -72,11 +72,17 @@ export function isRecordedNoVoicemailGreeting(message: string): boolean {
   return refusal && greeting && unavailable && !liveOrQuoted;
 }
 
+// A clipped screening instruction is automation evidence, not evidence that
+// its greeting finished or that a live person hung up.
+export function isClippedScreeningInstruction(message: string): boolean {
+  return /^(?:(?:hi|hello)[.!?, ]+)?if you record your(?:\s+name)?[ .\u2026\u2014-]*$/i.test(normalizeText(message));
+}
+
 function isAutomatedMessage(message: string): boolean {
   const text = normalizeText(message);
 
   return (
-    isRecordedNoVoicemailGreeting(message) ||
+    isRecordedNoVoicemailGreeting(message) || isClippedScreeningInstruction(message) ||
     /\b(?:automated (?:system|attendant)|recording|pre-?recorded|call screening|screening service|phone tree|ivr|virtual assistant)\b/.test(
       text,
     ) ||

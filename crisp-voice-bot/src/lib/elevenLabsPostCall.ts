@@ -18,7 +18,7 @@ import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContex
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "./elevenLabsDoNotCall";
-import { hasTerminalVoicemailManagementMenu, isAutomatedMessageTakerConversation, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+import { hasTerminalVoicemailManagementMenu, isAutomatedMessageTakerConversation, isClippedScreeningInstruction, isRecordedNoVoicemailGreeting, isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
@@ -905,14 +905,10 @@ export function shouldTreatAsRecordedScreenerTerminal(conversation: ElevenLabsCo
   const messages = userMessages(conversation).map(normalizeText);
   const hasScreeningPrompt = messages.some((text) =>
     /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
-    isTruncatedRecordedNamePrompt(text) ||
+    isClippedScreeningInstruction(text) ||
     /\b(?:call assist by google|call screening|screening (?:service|assistant)|please stay on the(?: line)?|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text),
   );
   return hasScreeningPrompt;
-}
-
-function isTruncatedRecordedNamePrompt(text: string): boolean {
-  return /^(?:hi[,. ]+)?if you record your(?: name)?[ .…-]*$/.test(text);
 }
 
 export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): boolean {
@@ -2178,8 +2174,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
   for (const item of transcript) {
     if (item.role === "user" && typeof item.message === "string") {
       const text = normalizeText(item.message);
-      const screeningTurn = /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
-        isTruncatedRecordedNamePrompt(text) ||
+      const screeningTurn = isClippedScreeningInstruction(item.message) || /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
         /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available|(?:the )?call could not be connected)\b/.test(text);
       if (screeningTurn) {
         sawScreening = true;

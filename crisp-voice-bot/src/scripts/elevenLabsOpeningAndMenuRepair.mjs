@@ -29,6 +29,7 @@ export function applyOpeningAndMenuRepair(agent) {
 }
 
 export function restoreR26Opening(prompt) {
+  prompt = restoreR28Prompt(prompt);
   if (prompt.split(opening).length !== 2) throw new Error('Expected current opening instruction missing');
   return prompt.replace(opening, r26Opening);
 }
@@ -49,3 +50,4 @@ export function shortenR27Opening(agent) {
   }
   return result;
 }
+import { restoreR28Prompt } from './elevenLabsTerminalOpeningRepair.mjs';
