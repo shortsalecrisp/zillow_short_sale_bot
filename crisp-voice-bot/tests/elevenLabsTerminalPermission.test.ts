@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { assessElevenLabsTerminalPermission, MAX_TERMINAL_HISTORY_BYTES } from "../src/lib/elevenLabsTerminalPermission";
 
+test("number loop ending requires repeated identical correct readbacks and a final answer", () => {
+  const question = "Got it. Four zero four, three hundred, nine five two six. Is that right?";
+  const answer = "It's four zero four, three zero zero, nine five two six.";
+  const entries = [{role:"agent",message:"Yoni's number is four zero four, three zero zero, nine five two six."},
+    ...Array.from({length: 3}, () => [{role:"user",message:question}, {role:"agent",message:answer}]).flat(),
+    {role:"user",message:question}];
+  const check = (e: typeof entries) => assessElevenLabsTerminalPermission({conversation_id:"conv_123456789012", history: JSON.stringify({"x-elevenlabs-history":true,entries:e})});
+  assert.equal(check(entries).permission, false);
+  const finished = [...entries, {role:"agent",message:"Yes, that number is correct. Thank you for taking the message."}];
+  assert.equal(check(finished).decision, "repeated_number_confirmation");
+  assert.equal(check([...finished,{role:"user",message:"Wait, I have another question."}]).permission, false);
+  assert.notEqual(check([...finished,{role:"user",message:"Please do not call again."}]).decision, "repeated_number_confirmation");
+  assert.equal(check(finished.slice(2)).permission, false);
+  assert.equal(check(finished.map(e => e.role === "user" ? {...e,message:e.message.replace("nine five two six", "nine five two seven")} : e)).permission, false);
+});
+
 const conversation_id = "conv_0000000000synthetic";
 const history = (messages: string[]) => JSON.stringify({ "x-elevenlabs-history": true,
   entries: messages.flatMap((message) => [{ role: "user", message }, { role: "agent", message: "Understood." }]) });

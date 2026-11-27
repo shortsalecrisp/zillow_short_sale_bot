@@ -11,7 +11,7 @@ import { NATIVE_RECORDING_POLICY } from '../src/scripts/elevenLabsLiveFlowRepair
 import { applyTerminalOpeningRepair, buildTerminalOpeningPrompt, restoreR28Prompt, terminalOpeningProtectedHashes,
   ROOT_REPLACEMENTS, TERMINAL_RECORDING_POLICY, LISTENER_STATE_POLICY, TERMINAL_OPENING_PATHS } from '../src/scripts/elevenLabsTerminalOpeningRepair.mjs';
 
-const prompt = extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md', import.meta.url), 'utf8'));
+const prompt = extractPrompt(await readFile(new URL('./fixtures/elevenlabs-agent-prompt-r29.md', import.meta.url), 'utf8'));
 const old = restoreR28Prompt(prompt);
 const terminal = 'On attempt two, a recorded screener ending with “not available” and an additional-message invitation goes directly to recorded_no_voicemail_exit. On either attempt, the same completed automated phone menu played twice without an intervening human also goes directly to recorded_no_voicemail_exit. End silently before skip_turn. Preserve a real hold, later live speech and normal mailbox handling.';
 const ids = ['agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv'];

@@ -9,7 +9,7 @@ const MAX_MESSAGE_LENGTH = 12000;
 type HistoryEntry = { role: "user" | "agent" | "tool"; message?: string };
 type EndDecision = "invalid_input" | "no_caller_words" | "recording_or_hold" | "explicit_stop"
   | "pending_question_or_correction" | "caller_goodbye" | "service_declined"
-  | "automated_message_complete" | "no_ending_request";
+  | "automated_message_complete" | "repeated_number_confirmation" | "no_ending_request";
 
 export type TerminalPermission = {
   ok: boolean;
@@ -163,6 +163,28 @@ function isPurposeConfusion(text: string): boolean {
     || /^(?:are you (?:a computer|ai|an ai|a bot)[? ]*)?(?:what do you want(?: from me)?|why are you calling)$/.test(cleaned);
 }
 
+// This narrow fallback only applies after Maya has answered the latest repeated
+// read-back. It is not a general permission to end on repeated questions.
+function isCompletedNumberConfirmationLoop(entries: HistoryEntry[]): boolean {
+  const turns = entries.filter(e => (e.role === "user" || e.role === "agent") && e.message?.trim());
+  const ack = "yes, that number is correct. thank you for taking the message.";
+  if (turns.at(-1)?.role !== "agent" || normalize(turns.at(-1)?.message ?? "") !== ack) return false;
+  const prior = turns.slice(0, -1);
+  if (prior.length < 8 || prior.at(-1)?.role !== "user") return false;
+  const canonical = (value: string) => normalize(value).replace(/[-,.!?]/g, " ").replace(/\s+/g, " ").trim();
+  const repeated = canonical(prior.at(-1)?.message ?? "");
+  // Accept only this exact digit sequence and an unqualified confirmation
+  // request. Other questions, requests and corrections retain priority.
+  if (!/^(?:got it )?(?:four (?:zero|oh) four) (?:three hundred|three zero zero) (?:nine thousand five hundred (?:and )?twenty six|nine five two six) is that right$/.test(repeated)) return false;
+  const tail = prior.slice(-7);
+  if (tail.length !== 7) return false;
+  return tail.every((entry, i) => i % 2 === 0
+    ? entry.role === "user" && canonical(entry.message ?? "") === repeated
+    : entry.role === "agent" && /\bfour (?:zero|oh) four\b/.test(normalize(entry.message ?? ""))
+      && /\bthree (?:zero zero|hundred)\b/.test(normalize(entry.message ?? ""))
+      && /\bnine (?:five two six|thousand five hundred)/.test(normalize(entry.message ?? "")));
+}
+
 // Only a system-bound, authenticated history may reach this function in production.
 // The hash identifies the latest observed user history; it is not an atomic hang-up lock.
 export function assessElevenLabsTerminalPermission(input: unknown, requestId = randomUUID()): TerminalPermission {
@@ -187,6 +209,7 @@ export function assessElevenLabsTerminalPermission(input: unknown, requestId = r
   // Recordings and reported examples are not live instructions, even if they contain STOP.
   if (isHold(latest) || hasUnresolvedRecordingContext(callerMessages)) return { ...response, decision: "recording_or_hold" };
   if (isReportedOrConditional(endingText) || hasOpenQuotation(callerMessages)) return { ...response, decision: "pending_question_or_correction" };
+  if (isCompletedNumberConfirmationLoop(entries)) return { ...response, permission: true, decision: "repeated_number_confirmation" };
   const stopIndex = explicitStopIndex(clauses, entries);
   if (stopIndex >= 0) {
     // A later wait/question/revocation must not be lost behind an earlier ending request.

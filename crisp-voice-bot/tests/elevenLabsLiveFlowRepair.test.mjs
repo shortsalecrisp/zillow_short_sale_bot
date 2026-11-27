@@ -10,7 +10,7 @@ import {NEW_OPENING,SILENT_RECORDING_CONDITION} from '../src/scripts/elevenLabsS
 import {AI_DISCLOSURE_OLD,AI_DISCLOSURE_NEW} from '../src/scripts/elevenLabsMultilingualAiDisclosure.mjs';
 import {applyLiveFlowRepair,restoreR24Prompt,buildLiveFlowPrompt,liveFlowProtectedHashes,FLOW_PATHS,OLD_HANDOFF,NEW_HANDOFF,NATIVE_RECORDING_POLICY,NATIVE_RECORDING_EXIT_CONDITION} from '../src/scripts/elevenLabsLiveFlowRepair.mjs';
 import {restoreR26Opening} from '../src/scripts/elevenLabsOpeningAndMenuRepair.mjs';
-const prompt=restoreR26Opening(extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8'))),old=restoreR24Prompt(prompt);
+const prompt=restoreR26Opening(extractPrompt(await readFile(new URL('./fixtures/elevenlabs-agent-prompt-r29.md',import.meta.url),'utf8'))),old=restoreR24Prompt(prompt);
 function fixture(i=0){
  const nodes={recorded_no_voicemail_exit:{type:'end',edge_order:[]}},edges={};
  for(const c of ['opening_listener','main_conversation']){

@@ -13,6 +13,7 @@ import { applyAiVoicemailRepair, aiVoicemailProtectedHashes } from './elevenLabs
 import {applySilentRecordingExit,silentRecordingProtectedHashes} from './elevenLabsSilentRecordingExit.mjs';
 import {applyLiveFlowRepair,liveFlowProtectedHashes} from './elevenLabsLiveFlowRepair.mjs';
 import {applyTerminalOpeningRepair,terminalOpeningProtectedHashes} from './elevenLabsTerminalOpeningRepair.mjs';
+import {applyNumberLoopRepair,loopProtectedHashes} from './elevenLabsNumberLoopRepair.mjs';
 export { comparisonBody, digest };
 function contactProtectedHashes(agent) {
   const config = structuredClone(agent.conversation_config);
@@ -80,12 +81,12 @@ export function assertComparison(control, test) {
   }
 }
 
-export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, repairSharedBusinessPrompt = false, repairNoVoicemail = false, repairConversationRecovery = false, repairScreeningRecovery = false, repairAiVoicemail = false, repairSilentRecording = false, repairLiveFlow = false, repairTerminalOpening = false, holdAudio,
+export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, repairSharedBusinessPrompt = false, repairNoVoicemail = false, repairConversationRecovery = false, repairScreeningRecovery = false, repairAiVoicemail = false, repairSilentRecording = false, repairLiveFlow = false, repairTerminalOpening = false, repairNumberLoop = false, holdAudio,
   contactToolReplacements, contactToolMapHash, verifyContactTools }, fetcher = fetch) {
   if (!apiKey || !/^agent_[a-z0-9]+$/.test(agentId ?? '') || branches?.length !== 2
     || new Set(branches.map(b => b.id)).size !== 2 || !receiptDir) throw new Error('Two explicit reviewed branches required');
-  if ([repairTerminalOpening, repairLiveFlow, repairSilentRecording, repairAiVoicemail, repairScreeningRecovery, repairConversationRecovery, repairAcceptedTransfer, repairSharedBusinessPrompt, repairNoVoicemail, Boolean(holdAudio), Boolean(contactToolReplacements)].filter(Boolean).length > 1) throw new Error('One reviewed release profile at a time');
-  const productionRelease = repairTerminalOpening;
+  if ([repairNumberLoop, repairTerminalOpening, repairLiveFlow, repairSilentRecording, repairAiVoicemail, repairScreeningRecovery, repairConversationRecovery, repairAcceptedTransfer, repairSharedBusinessPrompt, repairNoVoicemail, Boolean(holdAudio), Boolean(contactToolReplacements)].filter(Boolean).length > 1) throw new Error('One reviewed release profile at a time');
+  const productionRelease = repairTerminalOpening || repairNumberLoop;
   if (productionRelease && (agentId !== 'agent_9901kpkhs1cmfgj8w9vm199nc92j' ||
     branches[0].id !== 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks' || branches[1].id !== 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv')) {
     throw new Error('Production repair requires the reviewed inactive Flash branch first, then active v4');
@@ -94,7 +95,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
   if (contactRelease && (!/^[a-f0-9]{64}$/.test(contactToolMapHash ?? '') || typeof verifyContactTools !== 'function')) {
     throw new Error('Verified contact-tool map and fresh resource verifier required');
   }
-  const managedRelease = repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || repairAcceptedTransfer || repairSharedBusinessPrompt || repairNoVoicemail || Boolean(holdAudio) || contactRelease;
+  const managedRelease = repairNumberLoop || repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || repairAcceptedTransfer || repairSharedBusinessPrompt || repairNoVoicemail || Boolean(holdAudio) || contactRelease;
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${agentId}`;
   const get = async url => {
     const r = await fetcher(url, { method: 'GET', headers: { 'xi-api-key': apiKey }, signal: AbortSignal.timeout(45000) });
@@ -113,7 +114,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     }
   };
   const prompt = extractPrompt(await readFile(promptPath, 'utf8'));
-  const protectedForRelease = repairTerminalOpening ? terminalOpeningProtectedHashes : repairLiveFlow ? liveFlowProtectedHashes : repairSilentRecording ? silentRecordingProtectedHashes : repairAiVoicemail ? aiVoicemailProtectedHashes : repairScreeningRecovery ? screeningRecoveryProtectedHashes : repairConversationRecovery ? recoveryProtectedHashes : repairNoVoicemail ? noVoicemailProtectedHashes : repairSharedBusinessPrompt ? sharedBusinessPromptProtectedHashes : contactRelease ? contactProtectedHashes : holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
+  const protectedForRelease = repairNumberLoop ? loopProtectedHashes : repairTerminalOpening ? terminalOpeningProtectedHashes : repairLiveFlow ? liveFlowProtectedHashes : repairSilentRecording ? silentRecordingProtectedHashes : repairAiVoicemail ? aiVoicemailProtectedHashes : repairScreeningRecovery ? screeningRecoveryProtectedHashes : repairConversationRecovery ? recoveryProtectedHashes : repairNoVoicemail ? noVoicemailProtectedHashes : repairSharedBusinessPrompt ? sharedBusinessPromptProtectedHashes : contactRelease ? contactProtectedHashes : holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
   const verifyAudioTool = async () => {
     if (!holdAudio || !/^tool_[a-z0-9]+$/.test(holdAudio.id ?? '') || holdAudio.id === AVAILABILITY_TOOL_ID
       || !/^[a-f0-9]{64}$/.test(holdAudio.sourceHash ?? '') || !/^[a-f0-9]{64}$/.test(holdAudio.candidateHash ?? '')) throw new Error('Exact reviewed shared audio-tool clone required');
@@ -137,7 +138,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     before.push(agent);
   }
   const candidates = before.map(agent => {
-    const result = repairTerminalOpening ? applyTerminalOpeningRepair(agent,prompt) : repairLiveFlow ? applyLiveFlowRepair(agent,prompt) : repairSilentRecording ? applySilentRecordingExit(agent,prompt) : repairAiVoicemail ? applyAiVoicemailRepair(agent,prompt) : repairScreeningRecovery ? applyScreeningRecovery(agent,prompt) : repairConversationRecovery ? applyConversationRecovery(agent,prompt) : repairNoVoicemail ? applyNoVoicemailWorkflow(agent, prompt) : repairSharedBusinessPrompt ? applySharedBusinessPrompt(agent, prompt) : contactRelease ? replaceContactBindings(agent, contactToolReplacements)
+    const result = repairNumberLoop ? applyNumberLoopRepair(agent,prompt) : repairTerminalOpening ? applyTerminalOpeningRepair(agent,prompt) : repairLiveFlow ? applyLiveFlowRepair(agent,prompt) : repairSilentRecording ? applySilentRecordingExit(agent,prompt) : repairAiVoicemail ? applyAiVoicemailRepair(agent,prompt) : repairScreeningRecovery ? applyScreeningRecovery(agent,prompt) : repairConversationRecovery ? applyConversationRecovery(agent,prompt) : repairNoVoicemail ? applyNoVoicemailWorkflow(agent, prompt) : repairSharedBusinessPrompt ? applySharedBusinessPrompt(agent, prompt) : contactRelease ? replaceContactBindings(agent, contactToolReplacements)
       : holdAudio ? applyTransferHoldAudio(agent, holdAudio.id) : repairAcceptedTransfer ? applyAcceptedTransferWorkflow(agent) : structuredClone(agent);
     if (managedRelease && !contactRelease && !repairSharedBusinessPrompt && result.conversation_config.agent.prompt.prompt !== prompt) {
       throw new Error('Managed transfer repair must preserve the existing business prompt');
@@ -147,7 +148,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
   });
   assertComparison(...candidates);
   const plan = { agentId, branches, promptHash: sha256(prompt), protected: before.map(protectedForRelease),
-    ...(managedRelease ? { release: repairTerminalOpening ? 'v4-production-terminal-opening-r29' : repairLiveFlow ? 'unscreened-opening-and-native-silent-ending-r26' : repairSilentRecording ? 'second-attempt-silent-exit-r24' : repairAiVoicemail ? 'ai-status-and-second-attempt-recording-r22' : repairScreeningRecovery ? 'screening-listener-and-recording-r21' : repairConversationRecovery ? 'confirmed-state-and-missing-handoff-r19' : repairNoVoicemail ? 'recorded-no-voicemail-r17' : repairSharedBusinessPrompt ? 'shared-business-prompt-r14' : contactRelease ? 'recorded-voicemail-contact-guard-r12' : holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
+    ...(managedRelease ? { release: repairNumberLoop ? 'v4-production-number-loop-r30' : repairTerminalOpening ? 'v4-production-terminal-opening-r29' : repairLiveFlow ? 'unscreened-opening-and-native-silent-ending-r26' : repairSilentRecording ? 'second-attempt-silent-exit-r24' : repairAiVoicemail ? 'ai-status-and-second-attempt-recording-r22' : repairScreeningRecovery ? 'screening-listener-and-recording-r21' : repairConversationRecovery ? 'confirmed-state-and-missing-handoff-r19' : repairNoVoicemail ? 'recorded-no-voicemail-r17' : repairSharedBusinessPrompt ? 'shared-business-prompt-r14' : contactRelease ? 'recorded-voicemail-contact-guard-r12' : holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
       ...(productionRelease ? { mode: 'v4_production', trafficPercent: [0, 100] } : {}),
       ...(holdAudio ? { holdAudio } : {}), ...(contactRelease ? { contactToolMapHash } : {}), beforeBodies: before.map(a => digest(comparisonBody(a))) } : {}),
     sharedHash: digest(comparisonBody(candidates[0])), workflowHash: digest(comparisonBody(candidates[0]).workflow) };
@@ -183,9 +184,9 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
       try {
         const r = await fetcher(`${endpoint}?branch_id=${encodeURIComponent(branches[i].id)}&enable_versioning_if_not_enabled=true`, {
           method: 'PATCH', headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workflow: candidates[i].workflow, ...((repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || holdAudio || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? {
-            conversation_config: { agent: { prompt: { ...((repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? { prompt } : {}),
-              ...(!repairTerminalOpening && !repairLiveFlow && !repairSilentRecording && !repairAiVoicemail && !repairScreeningRecovery && !repairConversationRecovery && !repairSharedBusinessPrompt && !repairNoVoicemail ? { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } : {}) } } } } : {}) }), signal: AbortSignal.timeout(60000) });
+          body: JSON.stringify({ workflow: candidates[i].workflow, ...((repairNumberLoop || repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || holdAudio || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? {
+            conversation_config: { agent: { prompt: { ...((repairNumberLoop || repairTerminalOpening || repairLiveFlow || repairSilentRecording || repairAiVoicemail || repairScreeningRecovery || repairConversationRecovery || contactRelease || repairSharedBusinessPrompt || repairNoVoicemail) ? { prompt } : {}),
+              ...(!repairNumberLoop && !repairTerminalOpening && !repairLiveFlow && !repairSilentRecording && !repairAiVoicemail && !repairScreeningRecovery && !repairConversationRecovery && !repairSharedBusinessPrompt && !repairNoVoicemail ? { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } : {}) } } } } : {}) }), signal: AbortSignal.timeout(60000) });
         if (!r.ok) throw new Error(`Provider managed PATCH failed HTTP ${r.status}; read back before retrying`);
         const after = await read(branches[i]);
         if (after.agent_id !== agentId || after.branch_id !== branches[i].id || !after.version_id

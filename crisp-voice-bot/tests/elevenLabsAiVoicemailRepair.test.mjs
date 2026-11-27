@@ -12,7 +12,7 @@ import {OLD_ATTEMPT,NEW_ATTEMPT,OLD_MESSAGE,NEW_MESSAGE,OLD_DELIVERY,NEW_DELIVER
 import {AI_DISCLOSURE_OLD,AI_DISCLOSURE_NEW} from '../src/scripts/elevenLabsMultilingualAiDisclosure.mjs';
 import {restoreR24Prompt} from '../src/scripts/elevenLabsLiveFlowRepair.mjs';
 import {restoreR26Opening} from '../src/scripts/elevenLabsOpeningAndMenuRepair.mjs';
-const prompt=restoreR24Prompt(restoreR26Opening(extractPrompt(await readFile(new URL('../docs/elevenlabs-agent-prompt.md',import.meta.url),'utf8')))).replace(AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD).replace(NEW_ATTEMPT,OLD_ATTEMPT).replace(NEW_MESSAGE,OLD_MESSAGE).replace(NEW_DELIVERY,OLD_DELIVERY);
+const prompt=restoreR24Prompt(restoreR26Opening(extractPrompt(await readFile(new URL('./fixtures/elevenlabs-agent-prompt-r29.md',import.meta.url),'utf8')))).replace(AI_DISCLOSURE_NEW,AI_DISCLOSURE_OLD).replace(NEW_ATTEMPT,OLD_ATTEMPT).replace(NEW_MESSAGE,OLD_MESSAGE).replace(NEW_DELIVERY,OLD_DELIVERY);
 const old=prompt.replace(AI_STATUS_NEW,AI_STATUS_OLD).replace(SECOND_ATTEMPT_NEW,SECOND_ATTEMPT_OLD);
 function fixture(i=0){
   const edges={},nodes={recorded_no_voicemail_exit:{type:'end',edge_order:[],return_when_nested:true}};
