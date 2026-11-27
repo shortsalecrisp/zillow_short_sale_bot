@@ -113,3 +113,16 @@ test("production script repair preserves the adoption boundary and older receipt
   input.versionId = old.versionId;
   assert.equal(v4ProductionReceiptRelease(input), null);
 });
+
+test("r30 keeps r29 receipts and excludes the second of its verified boundary", () => {
+  const [, previous, current] = ELEVENLABS_V4_PRODUCTION_RELEASES;
+  const input = {finalReceiptMatched:true,testMode:false,durationSecs:20,branchId:ELEVENLABS_V4_PRODUCTION.branchId,
+    versionId:previous.versionId,startTimeUnixSecs:Math.floor(Date.parse(current.releaseStartedAt)/1000)-1};
+  assert.equal(v4ProductionReceiptRelease(input)?.releaseId, previous.releaseId);
+  input.startTimeUnixSecs = Math.floor(Date.parse(current.releaseStartedAt)/1000);
+  assert.equal(v4ProductionReceiptRelease(input), null);
+  input.versionId = current.versionId;
+  assert.equal(v4ProductionReceiptRelease(input), null);
+  input.startTimeUnixSecs += 1;
+  assert.equal(v4ProductionReceiptRelease(input)?.releaseId, current.releaseId);
+});

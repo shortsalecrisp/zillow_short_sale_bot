@@ -10,9 +10,9 @@ export const ELEVENLABS_V4_PRODUCTION = Object.freeze({
   mode: "v4_production",
   startedAt: "2026-11-25T17:40:58.963Z",
   branchId: ELEVENLABS_TTS_TEST_BRANCH_ID,
-  versionId: "agtvrsn_1001m8c11yw2e1nbvnew4v7qvtqq",
-  releaseId: "maya_v4_production_20261126_r29",
-  releaseStartedAt: "2026-11-26T13:34:56.850Z",
+  versionId: "agtvrsn_6701m8f3t0dwffv95mh3hxvv474d",
+  releaseId: "maya_v4_production_20261127_r30",
+  releaseStartedAt: "2026-11-27T18:20:45.246Z",
   ttsModel: ELEVENLABS_TTS_TEST_MODEL,
   trafficPercent: 100,
   selectionReason: "Owner-selected production model; not a statistically established A/B winner",
@@ -20,7 +20,9 @@ export const ELEVENLABS_V4_PRODUCTION = Object.freeze({
 
 export const ELEVENLABS_V4_PRODUCTION_RELEASES = Object.freeze([
   { releaseId: "maya_v4_production_20261125_r28", releaseStartedAt: ELEVENLABS_V4_PRODUCTION.startedAt,
-    releaseEndedAt: ELEVENLABS_V4_PRODUCTION.releaseStartedAt, versionId: "agtvrsn_1301m89e87r0expr4tenxnxjqngj" },
+    releaseEndedAt: "2026-11-26T13:34:56.850Z", versionId: "agtvrsn_1301m89e87r0expr4tenxnxjqngj" },
+  { releaseId: "maya_v4_production_20261126_r29", releaseStartedAt: "2026-11-26T13:34:56.850Z",
+    releaseEndedAt: ELEVENLABS_V4_PRODUCTION.releaseStartedAt, versionId: "agtvrsn_1001m8c11yw2e1nbvnew4v7qvtqq" },
   { releaseId: ELEVENLABS_V4_PRODUCTION.releaseId, releaseStartedAt: ELEVENLABS_V4_PRODUCTION.releaseStartedAt,
     releaseEndedAt: null, versionId: ELEVENLABS_V4_PRODUCTION.versionId },
 ]);

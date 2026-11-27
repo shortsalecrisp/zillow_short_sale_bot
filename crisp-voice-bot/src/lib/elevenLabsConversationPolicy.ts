@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "maya-v4-production-20261126-r29";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-v4-production-20261127-r30";
 
 export const VOICE_OPENING_SCRIPT = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale lender paperwork. Is {{streetAddress}} your listing?";
 export const VOICE_SHORT_LISTING_RECOVERY = "Is {{streetAddress}} your listing?";

@@ -9,7 +9,7 @@ try {
   const statusResponse = await fetch('https://crisp-voice-bot.onrender.com/experiment-status', {signal:AbortSignal.timeout(30000)});
   if (!statusResponse.ok) throw Error('Runtime status unavailable');
   const status = await statusResponse.json();
-  if (status.commit !== '9239642a732817d5a90575cbe93d10f2119f3385' || status.testMode || status.ownerControl?.paused || !status.ownerControl?.outboundEnabled || status.providerCircuit?.open || status.runtimeExperiment?.mode !== 'v4_production') throw Error('Runtime precondition failed');
+  if (status.commit !== '253bba9ff97d437d5d6ca1d2b19ac87590f249c6' || status.testMode || status.ownerControl?.paused || !status.ownerControl?.outboundEnabled || status.providerCircuit?.open || status.runtimeExperiment?.mode !== 'v4_production') throw Error('Runtime precondition failed');
   const verified = await verifyLiveV4Production({apiKey:env.ELEVENLABS_API_KEY});
   const audio = await verifyLiveTransferAudio({apiKey:env.ELEVENLABS_API_KEY});
   if (!verified.ok || !audio.ok) throw Error('Provider or audio precondition failed');

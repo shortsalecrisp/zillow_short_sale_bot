@@ -33,14 +33,14 @@ export const R28_COMPARISON = {
 // Retain the existing export name for callers of the current production verifier.
 export const R8_COMPARISON = {
   ...R28_COMPARISON,
-  cohort: 'maya_v4_production_20261126_r29',
-  startedAt: '2026-11-26T13:34:56.850Z',
+  cohort: 'maya_v4_production_20261127_r30',
+  startedAt: '2026-11-27T18:20:45.246Z',
   endedAt: null,
-  sharedHash: '5ce0c65a4c61dd2113b815fa2c2cb1bda5de9f2e05b946ce0ed280262708d5f5',
-  workflowHash: 'bcbbbca3e67c454ca97e393b572ae016f91fb84c9347dc765638b5306cadc467',
+  sharedHash: 'eccb0f1249860016420bb3af195c93984021291b8f665f70588c20edcead0815',
+  workflowHash: '49026a1f9f84d9feac502538f62d8eec27aa9f37afc44d960936adbf56475478',
   arms: [
-    { ...R28_COMPARISON.arms[0], versionId: 'agtvrsn_5501m8c11ty3fyb90zk5hcr4cvy4' },
-    { ...R28_COMPARISON.arms[1], versionId: 'agtvrsn_1001m8c11yw2e1nbvnew4v7qvtqq' },
+    { ...R28_COMPARISON.arms[0], versionId: 'agtvrsn_5601m8f3sxpbf8k9kqe0dvgbz53z' },
+    { ...R28_COMPARISON.arms[1], versionId: 'agtvrsn_6701m8f3t0dwffv95mh3hxvv474d' },
   ],
 };
 

@@ -482,7 +482,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   // Wording belongs to the policy family, not a revision allowlist. Provider/cohort admission stays exact.
   const policy = input.metadata.declaredConversationPolicyVersion ?? "";
   const usesServiceFirstOpening = policy === "maya-service-first-recovery-20261003" ||
-    /^maya-uniform-lead-conversion-\d{8}(?:-r[1-9]\d*)?$/.test(policy) || policy === "maya-v4-production-20261126-r29";
+    /^maya-uniform-lead-conversion-\d{8}(?:-r[1-9]\d*)?$/.test(policy) || policy === "maya-v4-production-20261126-r29" || policy === "maya-v4-production-20261127-r30";
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
     liveSpeechTranscript,
