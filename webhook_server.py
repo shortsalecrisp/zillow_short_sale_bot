@@ -8234,7 +8234,13 @@ def _sms_fast_decision(
         or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
         or str(row_obj.get("ai_state") or "").lower() == "handoff"
     ):
-        if _sms_is_substantive_post_handoff_update(t):
+        media_handoff_update = (
+            _sms_normalize_whitespace(inbound_text).lower() in {"image", "video", "audio", "file"}
+            and str(row_obj.get("ai_state") or "").lower() != "done"
+            and not _sms_is_prior_opt_out_conversation(row_obj)
+            and not _sms_is_unrelated_personal(inbound_text, row_obj)
+        )
+        if media_handoff_update or _sms_is_substantive_post_handoff_update(t):
             return _sms_decision(
                 lead_status=str(row_obj.get("mailshake_status") or "Y"),
                 handoff_needed=True,
@@ -8242,7 +8248,10 @@ def _sms_fast_decision(
                 block_reply=True,
                 preserve_existing_state=True,
                 handoff_type="HUMAN HANDOFF UPDATE",
-                reason="Substantive update received after human handoff",
+                reason=(
+                    "Media placeholder received after human handoff; review in Google Messages"
+                    if media_handoff_update else "Substantive update received after human handoff"
+                ),
             )
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),

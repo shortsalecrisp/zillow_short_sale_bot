@@ -1130,8 +1130,13 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
-  if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
-    if (isSubstantivePostHandoffUpdate_(inboundText)) {
+  const humanOverride = String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE";
+  const mediaHandoffUpdate = isSmsMediaPlaceholder_(inboundText) &&
+    (humanOverride || isManualFollowupLocked_(currentRowObj)) &&
+    String(currentRowObj[HEADERS.ai_state] || "").toLowerCase() !== "done" &&
+    !isPriorOptOutConversation_(currentRowObj);
+  if (humanOverride || mediaHandoffUpdate) {
+    if (mediaHandoffUpdate || isSubstantivePostHandoffUpdate_(inboundText)) {
       const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
       sendHandoffEmail_({
         handoff_type: "HUMAN HANDOFF UPDATE",
@@ -1145,6 +1150,7 @@ function handleIncomingSmsCore_(body) {
         state: currentRowObj[HEADERS.state] || "",
         zip: currentRowObj[HEADERS.zip] || "",
         last_message: inboundText,
+        media_placeholder: mediaHandoffUpdate,
         history: history
       });
     }
@@ -1153,7 +1159,9 @@ function handleIncomingSmsCore_(body) {
       should_reply: false,
       handoff_needed: true,
       needs_review: false,
-      reason: "Human override enabled"
+      reason: mediaHandoffUpdate
+        ? "Media placeholder received after human handoff; review in Google Messages"
+        : "Human override enabled"
     };
   }
 
@@ -1907,6 +1915,10 @@ function isSubstantivePostHandoffUpdate_(text) {
       isUnmistakableTerminalRejectionSignal_(t)) return false;
   const words = t.match(/[a-z0-9@.'+-]+/g) || [];
   return /\?/.test(t) || words.length >= 3 || t.length >= 18;
+}
+
+function isSmsMediaPlaceholder_(text) {
+  return /^(image|video|audio|file)$/i.test(normalizeWhitespace_(String(text || "")));
 }
 
 function normalizeTaskerPayload_(obj) {
@@ -7312,6 +7324,7 @@ ${historyText}
   };
   if (rawHandoffType === "HUMAN HANDOFF UPDATE") {
     payload.coalesce_key = normalizePhone_(data.phone) || String(data.email || fullName).trim().toLowerCase();
+    if (data.media_placeholder) payload.media_placeholder = true;
     return queueCoalescedHandoffEmailV18_(payload);
   }
   return queueHandoffEmailV11_(payload);

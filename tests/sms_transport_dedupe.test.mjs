@@ -130,3 +130,20 @@ test('human-owned updates coalesce into one delayed latest-context owner alert',
   assert.equal(JSON.parse(rows[1][3]).body, 'Video; invite to two addresses');
   assert.ok(new Date(rows[1][8]).getTime() > Date.now());
 });
+
+test('coalesced media and text keep one Google Messages instruction and the latest context', () => {
+  const h = harness();
+  h.context.media = {to: 'owner@example.com', subject: 'LEAD UPDATE', body: 'Image',
+    event_key: 'image', coalesce_key: '7025550101', media_placeholder: true};
+  h.context.detail = {...h.context.media, body: 'This is the signed agreement.',
+    event_key: 'detail', media_placeholder: false};
+  assert.equal(h.run('queueCoalescedHandoffEmailV18_(media)').queued, true);
+  assert.equal(h.run('queueCoalescedHandoffEmailV18_(detail)').coalesced, true);
+  assert.equal(h.run('queueCoalescedHandoffEmailV18_(media)').duplicate, true);
+  const rows = h.sheets.get('sms_handoff_email_outbox').rows;
+  assert.equal(rows.length, 2);
+  const pending = JSON.parse(rows[1][3]);
+  assert.equal(pending.media_placeholder, true);
+  assert.equal(pending.body.match(/Google Messages/g).length, 1);
+  assert.match(pending.body, /This is the signed agreement\.$/);
+});

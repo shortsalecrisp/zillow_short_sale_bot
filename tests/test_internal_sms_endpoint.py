@@ -2042,6 +2042,40 @@ def test_sms_post_handoff_substantive_updates_request_one_owner_alert(monkeypatc
     assert courtesy["alert_needed"] is False
 
 
+def test_sms_post_handoff_media_placeholder_preserves_state_and_routes_once(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "scheduled_callback"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][37] = "yes"
+    sheet.rows[2][38] = "Monday at 3"
+    client = TestClient(module.app)
+    request = {
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": "Image", "message_id": "post-handoff-media-1",
+    }
+    response = client.post("/sms-chatbot", data=request)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "HUMAN HANDOFF UPDATE"
+    assert "review in Google Messages" in body["reason"]
+    assert client.post("/sms-chatbot", data=request).json()["duplicate"] is True
+    assert sheet.rows[2][15] == "scheduled_callback"
+    assert sheet.rows[2][37:39] == ["yes", "Monday at 3"]
+    assert sender.calls == []
+
+    row = {"human_override": "TRUE", "listing_address": "123 Example Lane", "ai_state": "handoff"}
+    for placeholder in [" VIDEO ", "Audio", "File"]:
+        assert module._sms_fast_decision(row, placeholder)["alert_needed"] is True
+    assert module._sms_fast_decision({**row, "listing_address": ""}, "Image")["alert_needed"] is False
+    assert module._sms_fast_decision(
+        {**row, "ai_state": "done", "mailshake_status": "R", "response_status": "STOP"}, "Image"
+    )["alert_needed"] is False
+
+
 def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkeypatch):
     module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
 

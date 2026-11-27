@@ -305,7 +305,7 @@ function queueHandoffEmailV11_(payload) {
 // receiving related updates. Existing terminal handoff alerts remain immediate.
 function queueCoalescedHandoffEmailV18_(payload) {
   if (ownerMutedHandoffPayloadV28_(payload)) return { ok: true, queued: false, suppressed: true };
-  var message = payload || {};
+  var message = Object.assign({}, payload || {});
   var coalesceKey = String(message.coalesce_key || "").trim();
   if (!message.to || !message.subject || !message.body || !coalesceKey) {
     throw new Error("Handoff update requires recipient, content, and coalesce key");
@@ -313,11 +313,17 @@ function queueCoalescedHandoffEmailV18_(payload) {
   message.seen_event_keys = [String(message.event_key || "")];
   installSmsOutboxTriggers_();
   var now = Date.now();
-  var digest = Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,
-    [String(message.to).toLowerCase(), message.subject, message.body].join("\n---\n")
-  );
-  var emailId = digest.map(function(value) { return (value + 256).toString(16).slice(-2); }).join("").slice(0, 32);
+  function prepareEmailId() {
+    if (message.media_placeholder) {
+      message.body = "A media placeholder arrived in this conversation. Open Google Messages to view the attachment.\n\n" +
+        message.body;
+    }
+    var digest = Utilities.computeDigest(
+      Utilities.DigestAlgorithm.SHA_256,
+      [String(message.to).toLowerCase(), message.subject, message.body].join("\n---\n")
+    );
+    return digest.map(function(value) { return (value + 256).toString(16).slice(-2); }).join("").slice(0, 32);
+  }
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_handoff_email_outbox") || ss.insertSheet("sms_handoff_email_outbox");
   ensureSmsSheetHeaders_(sheet, SMS_HANDOFF_EMAIL_HEADERS_);
@@ -337,18 +343,21 @@ function queueCoalescedHandoffEmailV18_(payload) {
         (prior.seen_event_keys || []).indexOf(String(message.event_key || "")) !== -1;
       var recent = now - new Date(rows[i][0]).getTime() < SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_;
       if (sameEvent && recent && ["queued", "claimed", "reconciling", "sent", "uncertain"].indexOf(status) !== -1) {
-        return { ok: true, queued: false, duplicate: true, email_id: String(rows[i][2] || emailId), status: status };
+        return { ok: true, queued: false, duplicate: true, email_id: String(rows[i][2] || prepareEmailId()), status: status };
       }
       if (status === "queued") {
         message.seen_event_keys = (prior.seen_event_keys || [String(prior.event_key || "")])
           .concat(message.seen_event_keys).filter(function(key, index, all) { return !!key && all.indexOf(key) === index; });
+        if (prior.media_placeholder) message.media_placeholder = true;
+        var coalescedId = prepareEmailId();
         sheet.getRange(i + 2, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length).setValues([[
-          new Date(now), "queued", emailId, JSON.stringify(message), 0, "", "", "",
+          new Date(now), "queued", coalescedId, JSON.stringify(message), 0, "", "", "",
           new Date(now + SMS_HANDOFF_UPDATE_DEBOUNCE_MS_)
         ]]);
-        return { ok: true, queued: true, coalesced: true, email_id: emailId };
+        return { ok: true, queued: true, coalesced: true, email_id: coalescedId };
       }
     }
+    var emailId = prepareEmailId();
     sheet.appendRow([
       new Date(now), "queued", emailId, JSON.stringify(message), 0, "", "", "",
       new Date(now + SMS_HANDOFF_UPDATE_DEBOUNCE_MS_)
